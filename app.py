@@ -152,23 +152,36 @@ class App(ctk.CTk):
     def show_tree_context_menu(self, event):
         """Shows a context menu on right-click."""
         try:
-            item_id = self.tree.identify_row(event.y)
-            if not item_id:
-                return
+            # Get all selected items
+            selected_items = self.tree.selection()
+            
+            # If right-click was on an unselected item, select it
+            item_id_under_mouse = self.tree.identify_row(event.y)
+            if item_id_under_mouse and item_id_under_mouse not in selected_items:
+                self.tree.selection_set(item_id_under_mouse)
+                selected_items = self.tree.selection() # Update selected_items
 
-            self.tree.selection_set(item_id)
-            item_data = self.tree.item(item_id)
-            status = item_data['values'][0] if item_data['values'] else ""
+            if not selected_items:
+                return
 
             from tkinter import Menu
             context_menu = Menu(self.tree, tearoff=0)
 
-            if status == "DIFFERENT":
+            # Determine if "Compare Selected File" should be enabled
+            can_diff = False
+            if len(selected_items) == 1:
+                item_data = self.tree.item(selected_items[0])
+                status = item_data['values'][0] if item_data['values'] else ""
+                if status == "DIFFERENT":
+                    can_diff = True
+            
+            if can_diff:
                 context_menu.add_command(label="Compare Selected File", command=self.open_diff_window)
             else:
                 context_menu.add_command(label="Compare Selected File", state="disabled")
 
-            context_menu.add_command(label="Change Attributes...", command=self.open_attributes_window)
+            # "Change Attributes..." is always available for selected items
+            context_menu.add_command(label="Change Attributes...", command=lambda: self.open_attributes_window(selected_items))
             context_menu.tk_popup(event.x_root, event.y_root)
 
         except Exception as e:
@@ -244,14 +257,14 @@ class App(ctk.CTk):
         diff_top_level.geometry("1100x700")
         DiffWindow(diff_top_level, s1_config, s2_config, item_values)
 
-    def open_attributes_window(self):
-        """Opens the AttributesWindow for the selected file."""
-        try:
-            selected_item = self.tree.selection()[0]
-            item_values = self.tree.item(selected_item)['values']
-        except IndexError:
-            self.show_error("Error", "No valid file selected.")
+    def open_attributes_window(self, selected_item_ids):
+        """Opens the AttributesWindow for the selected file(s)."""
+        if not selected_item_ids:
+            self.show_error("Error", "No file(s) selected.")
             return
+
+        # Extract item_values for all selected items
+        selected_items_data = [self.tree.item(item_id)['values'] for item_id in selected_item_ids]
 
         s1_config = {k: v.get() for k, v in self.server1_vars.items()}
         s2_config = {k: v.get() for k, v in self.server2_vars.items()}
@@ -260,7 +273,7 @@ class App(ctk.CTk):
         attr_top_level.title("Change Attributes")
         attr_top_level.geometry("500x400")
         attr_top_level.transient(self)
-        AttributesWindow(attr_top_level, s1_config, s2_config, item_values, self.update_status, self.start_comparison)
+        AttributesWindow(attr_top_level, s1_config, s2_config, selected_items_data, self.update_status, self.start_comparison)
         
     def open_sync_window(self):
         """Opens the SyncWindow for the current comparison."""
@@ -605,21 +618,24 @@ class AttributesWindow(ctk.CTkFrame):
     """
     A Toplevel window for changing file owner and permissions.
     """
-    def __init__(self, parent_toplevel, s1_config, s2_config, item_values, status_callback, refresh_callback):
+    def __init__(self, parent_toplevel, s1_config, s2_config, selected_items_data, status_callback, refresh_callback):
         super().__init__(parent_toplevel)
         self.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self.s1_config, self.s2_config, self.item_values = s1_config, s2_config, item_values
+        self.s1_config, self.s2_config, self.selected_items_data = s1_config, s2_config, selected_items_data
         self.status_callback, self.parent_toplevel = status_callback, parent_toplevel
         self.refresh_callback = refresh_callback
 
-        self.status, self.relative_path, self.owner_group, self.symbolic_perms, raw_octal_perms = item_values
-        self.octal_perms = str(raw_octal_perms) # Ensure it's a string
-        current_owner, current_group = self.owner_group.split(':', 1) if ':' in self.owner_group else (self.owner_group, "")
+        # Extract data from the first selected item for initial display/defaults
+        # The actual changes will be applied to all selected items
+        first_item = selected_items_data[0]
+        status, relative_path, owner_group, symbolic_perms, raw_octal_perms = first_item
+        octal_perms = str(raw_octal_perms) # Ensure it's a string
+        current_owner, current_group = owner_group.split(':', 1) if ':' in owner_group else (owner_group, "")
         
         self.owner_var = ctk.StringVar(value=current_owner.split(' -> ')[0])
         self.group_var = ctk.StringVar(value=current_group.split(' -> ')[0])
-        self.new_perms = ctk.StringVar(value=self.octal_perms.split(' -> ')[0]) # Initialize with octal
+        self.new_perms = ctk.StringVar(value=octal_perms.split(' -> ')[0]) # Initialize with octal
         
         self.change_queue, self.user_queue, self.group_queue = queue.Queue(), queue.Queue(), queue.Queue()
         self.tasks_running, self.user_fetch_tasks, self.group_fetch_tasks = 0, 0, 0
@@ -627,8 +643,15 @@ class AttributesWindow(ctk.CTkFrame):
 
         self.grid_columnconfigure(1, weight=1)
         
-        ctk.CTkLabel(self, text="File:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        ctk.CTkLabel(self, text=self.relative_path, wraplength=450, justify="left").grid(row=0, column=1, sticky="w", padx=5, pady=5)
+        ctk.CTkLabel(self, text="File(s):", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        
+        if len(self.selected_items_data) > 1:
+            file_display_text = f"{len(self.selected_items_data)} files selected"
+            # Optionally list first few files
+            # file_display_text += ": " + ", ".join([item[1] for item in self.selected_items_data[:3]]) + ("..." if len(self.selected_items_data) > 3 else "")
+        else:
+            file_display_text = relative_path
+        ctk.CTkLabel(self, text=file_display_text, wraplength=450, justify="left").grid(row=0, column=1, sticky="w", padx=5, pady=5)
 
         ctk.CTkLabel(self, text="Owner:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         self.owner_menu = ctk.CTkOptionMenu(self, variable=self.owner_var, values=["Loading..."], state="disabled")
@@ -637,15 +660,40 @@ class AttributesWindow(ctk.CTkFrame):
         ctk.CTkLabel(self, text="Group:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
         self.group_menu = ctk.CTkOptionMenu(self, variable=self.group_var, values=["Loading..."], state="disabled")
         self.group_menu.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
-        ctk.CTkLabel(self, text=f"(Current Owner:Group: {self.owner_group})", font=ctk.CTkFont(size=10)).grid(row=3, column=1, sticky="w", padx=5)
+        
+        # Display current owner/group/perms for the first item, or indicate mixed if applicable
+        if len(self.selected_items_data) == 1:
+            ctk.CTkLabel(self, text=f"(Current Owner:Group: {owner_group})", font=ctk.CTkFont(size=10)).grid(row=3, column=1, sticky="w", padx=5)
+        else:
+            # Check if all selected items have the same owner/group
+            all_same_owner_group = all(item[2] == owner_group for item in self.selected_items_data)
+            if all_same_owner_group:
+                ctk.CTkLabel(self, text=f"(Current Owner:Group: {owner_group})", font=ctk.CTkFont(size=10)).grid(row=3, column=1, sticky="w", padx=5)
+            else:
+                ctk.CTkLabel(self, text="(Current Owner:Group: Mixed)", font=ctk.CTkFont(size=10)).grid(row=3, column=1, sticky="w", padx=5)
+
 
         ctk.CTkLabel(self, text="Perms (octal)").grid(row=4, column=0, sticky="w", padx=5, pady=5)
         ctk.CTkEntry(self, textvariable=self.new_perms).grid(row=4, column=1, sticky="ew", padx=5, pady=5)
-        ctk.CTkLabel(self, text=f"(Current: {self.symbolic_perms} / {self.octal_perms})", font=ctk.CTkFont(size=10)).grid(row=5, column=1, sticky="w", padx=5)
+        
+        if len(self.selected_items_data) == 1:
+            ctk.CTkLabel(self, text=f"(Current: {symbolic_perms} / {octal_perms})", font=ctk.CTkFont(size=10)).grid(row=5, column=1, sticky="w", padx=5)
+        else:
+            # Check if all selected items have the same permissions
+            all_same_perms = all(str(item[4]) == octal_perms for item in self.selected_items_data)
+            if all_same_perms:
+                ctk.CTkLabel(self, text=f"(Current: {symbolic_perms} / {octal_perms})", font=ctk.CTkFont(size=10)).grid(row=5, column=1, sticky="w", padx=5)
+            else:
+                ctk.CTkLabel(self, text="(Current Permissions: Mixed)", font=ctk.CTkFont(size=10)).grid(row=5, column=1, sticky="w", padx=5)
         
         self.target_test, self.target_prod = ctk.BooleanVar(value=False), ctk.BooleanVar(value=False)
-        if self.status in ["DIFFERENT", "IDENTICAL", "ONLY ON TEST"]: self.target_test.set(True)
-        if self.status in ["DIFFERENT", "IDENTICAL", "ONLY ON PROD"]: self.target_prod.set(True)
+        
+        # Determine initial state of TEST/PROD checkboxes based on all selected items
+        has_test_files = any(item[0] in ["DIFFERENT", "IDENTICAL", "ONLY ON TEST"] for item in self.selected_items_data)
+        has_prod_files = any(item[0] in ["DIFFERENT", "IDENTICAL", "ONLY ON PROD"] for item in self.selected_items_data)
+
+        self.target_test.set(has_test_files)
+        self.target_prod.set(has_prod_files)
 
         ctk.CTkLabel(self, text="Apply to:").grid(row=6, column=0, sticky="w", padx=5, pady=10)
         server_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -656,8 +704,9 @@ class AttributesWindow(ctk.CTkFrame):
         self.check_prod = ctk.CTkCheckBox(server_frame, text="PROD Server", variable=self.target_prod)
         self.check_prod.pack(side="left")
 
-        if self.status == "ONLY ON TEST": self.check_prod.configure(state="disabled")
-        if self.status == "ONLY ON PROD": self.check_test.configure(state="disabled")
+        # Disable checkboxes if no files are present on that server among the selection
+        if not has_test_files: self.check_test.configure(state="disabled")
+        if not has_prod_files: self.check_prod.configure(state="disabled")
 
         button_frame = ctk.CTkFrame(self, fg_color="transparent")
         button_frame.grid(row=7, column=0, columnspan=2, pady=10)
@@ -740,42 +789,60 @@ class AttributesWindow(ctk.CTkFrame):
             self.group_menu.configure(state="normal", values=[self.group_var.get()])
 
     def start_change_task(self):
-        """Starts the background task to change attributes."""
+        """Starts the background task to change attributes for all selected files."""
         self.apply_button.configure(state="disabled")
         self.status_callback("Applying changes...")
         self.tasks_running = 0
         owner, group, perms_str = self.owner_var.get(), self.group_var.get(), self.new_perms.get()
         
-        if self.target_test.get():
-            self.tasks_running += 1
-            threading.Thread(target=sftp_logic.change_attributes_task, args=(self.s1_config, self.relative_path, owner, group, perms_str, self.change_queue, "TEST"), daemon=True).start()
+        for item_data in self.selected_items_data:
+            status, relative_path, _, _, _ = item_data # Unpack relevant data
+            
+            # Apply to TEST server if selected and file is on TEST
+            if self.target_test.get() and status in ["DIFFERENT", "IDENTICAL", "ONLY ON TEST"]:
+                self.tasks_running += 1
+                threading.Thread(target=sftp_logic.change_attributes_task, args=(self.s1_config, relative_path, owner, group, perms_str, self.change_queue, f"TEST:{relative_path}"), daemon=True).start()
 
-        if self.target_prod.get():
-            self.tasks_running += 1
-            threading.Thread(target=sftp_logic.change_attributes_task, args=(self.s2_config, self.relative_path, owner, group, perms_str, self.change_queue, "PROD"), daemon=True).start()
+            # Apply to PROD server if selected and file is on PROD
+            if self.target_prod.get() and status in ["DIFFERENT", "IDENTICAL", "ONLY ON PROD"]:
+                self.tasks_running += 1
+                threading.Thread(target=sftp_logic.change_attributes_task, args=(self.s2_config, relative_path, owner, group, perms_str, self.change_queue, f"PROD:{relative_path}"), daemon=True).start()
 
         if self.tasks_running > 0: self.after(100, self.check_change_queue)
-        else: self.status_callback("No servers selected."); self.stop_loading()
+        else: self.status_callback("No servers selected or no relevant files on selected servers."); self.stop_loading()
 
     def check_change_queue(self):
         """Checks the queue for updates from the attribute change thread."""
         try:
             result = self.change_queue.get_nowait()
-            if isinstance(result, Exception):
-                self.show_error("Error", f"An error occurred:\n{result}")
+            
+            if isinstance(result, str):
+                if result.endswith(":Success"):
+                    self.tasks_running -= 1
+                    self.status_callback(f"Applied: {result.replace(':Success', '')}")
+                elif result.startswith("Error:"):
+                    self.tasks_running -= 1
+                    # Extract server_name and error message
+                    parts = result.split(':', 2) # Split at most twice
+                    server_info = parts[1] if len(parts) > 1 else "Unknown"
+                    error_msg = parts[2] if len(parts) > 2 else result
+                    self.show_error(f"Error on {server_info}", error_msg)
+                else:
+                    # General status update from sftp_logic (e.g., "Connecting...")
+                    self.status_callback(result)
+            elif isinstance(result, Exception):
                 self.tasks_running -= 1
-                if self.tasks_running <= 0: self.stop_loading()
-            elif isinstance(result, str):
-                 self.status_callback(result)
-                 self.after(100, self.check_change_queue)
-            elif isinstance(result, bool) and result is True:
-                self.tasks_running -= 1
-                if self.tasks_running <= 0:
-                    self.status_callback("Changes applied. Refreshing...")
-                    self.stop_loading()
-                    if self.refresh_callback:
-                        self.refresh_callback()
-                    self.parent_toplevel.after(1000, self.parent_toplevel.destroy) # Close after 1s
+                self.show_error("Error", f"An unexpected error occurred:\n{result}")
+            
+            if self.tasks_running <= 0:
+                self.status_callback("All changes processed. Refreshing...")
+                self.stop_loading()
+                if self.refresh_callback:
+                    self.refresh_callback()
+                self.parent_toplevel.after(1000, self.parent_toplevel.destroy) # Close after 1s
+            else:
+                self.after(100, self.check_change_queue)
+
         except queue.Empty:
             self.after(100, self.check_change_queue)
         except Exception as e:

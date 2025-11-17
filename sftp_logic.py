@@ -283,10 +283,9 @@ def change_attributes_task(config, relative_path, owner, group, perms_str, q_out
             except ValueError:
                 raise ValueError(f"Invalid permissions format: '{perms_str}'. Use an octal string (e.g., '755').")
 
-        q_out.put(f"({server_name}) Task complete.")
-        q_out.put(True)
+        q_out.put(f"{server_name}:Success")
     except Exception as e:
-        q_out.put(e)
+        q_out.put(f"Error:{server_name}:{e}")
     finally:
         if sftp: sftp.close()
         if ssh: ssh.close()
