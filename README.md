@@ -1,17 +1,66 @@
 # MINO: Mirroring Integrity Network Operations
 
-MINO (Mirroring Integrity Network Operations) is a Python-based GUI utility designed to simplify the management and synchronization of files between two remote SFTP servers, typically a testing (TEST) and a production (PROD) environment.
+MINO is a powerful and intuitive tool designed to facilitate the synchronization and management of files between a **TEST** server and a **PRODUCTION** server via SFTP. It provides a visual interface to compare directories, identify differences, and synchronize changes with confidence.
 
-It allows for a clear and interactive way to compare directory structures, view file differences, and synchronize content, ensuring that the production environment accurately mirrors the testing environment.
+![MINO Screenshot](assets/screenshot.png)
 
-## Core Features
+## Features
 
-- **SFTP Connectivity:** Securely connect to two different SFTP servers.
-- **Directory Comparison:** Recursively scans and compares directories on both servers, identifying files that are identical, different, or unique to one server. Comparison is based on MD5 hash, permissions, and ownership.
-- **Side-by-Side Diff:** Provides a built-in diff viewer to visually inspect content differences between two versions of a file.
-- **One-Way Synchronization:** Synchronize the PROD server to match the TEST server. This includes:
-  - Copying new and modified files from TEST to PROD.
-  - Deleting files from PROD that no longer exist on TEST.
-- **Attribute Management:** Change file/directory owner, group, and permissions directly from the UI.
-- **Backup Functionality:** Offers options to back up the PROD server (either remotely or locally) before performing a sync operation.
-- **Theming:** Supports light, dark, and system-native themes.
+*   **Dual-Pane Comparison**: Visually compare the contents of two remote server directories side-by-side.
+*   **Hash-Based Verification**: Uses MD5 hashing to ensure file integrity and accurately detect changes, even if timestamps differ.
+*   **Selective Synchronization**:
+    *   **Sync All**: Synchronize entire folders from TEST to PROD.
+    *   **Single File Sync**: Right-click to sync individual files immediately.
+*   **Integrated Editor**: Edit remote files directly within the application and save changes back to the server.
+*   **Diff Viewer**: View line-by-line differences between files on TEST and PROD.
+*   **Backup System**:
+    *   **Remote Backup**: Create a backup copy of the production folder on the server itself before syncing.
+    *   **Local Backup**: Download a backup of the production folder to your local machine.
+*   **Workspace Management**: Save and load server configurations (Host, User, Path, etc.) to quickly switch between environments. Supports secure password saving.
+*   **Attribute Management**: View and modify file permissions (chmod) and ownership (chown).
+
+## Installation
+
+1.  Clone the repository:
+    ```bash
+    git clone https://github.com/Negatorto/mino.git
+    cd mino
+    ```
+
+2.  Install the required dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Usage
+
+1.  Run the application:
+    ```bash
+    python main.py
+    ```
+
+2.  **Configure Servers**:
+    *   Enter the connection details (Host, Port, Username, Password, Remote Path) for both the **TEST Server** (Source) and **PRODUCTION Server** (Destination).
+
+3.  **Compare**:
+    *   Click **"Compare Folders"** to scan both servers and see the differences.
+    *   Files will be listed with their status: `IDENTICAL`, `DIFFERENT`, `ONLY ON TEST`, or `ONLY ON PROD`.
+
+4.  **Synchronize**:
+    *   **Full Sync**: Click **"Sync TEST -> PROD"** to open the synchronization window. You can choose to backup the destination first and whether to delete files that are only on PROD.
+    *   **Single File**: Right-click a file in the list and select **"Sync File (TEST -> PROD)"**.
+
+5.  **Edit & Diff**:
+    *   Select a file and click **"Compare Selected File"** (or right-click) to view content differences.
+    *   In the Diff window, use the **"Edit TEST"** or **"Edit PROD"** buttons to modify files directly.
+
+## Requirements
+
+*   Python 3.x
+*   `customtkinter`
+*   `paramiko`
+
+## License
+
+This project is licensed under the **GNU General Public License v3.0**.
+See the [LICENSE](LICENSE) file for details. ♥️

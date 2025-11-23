@@ -460,3 +460,87 @@ def sync_folders_task(s1_config, s2_config, comparison_results, delete_on_prod, 
         for sftp, ssh in [(sftp1, ssh1), (sftp2, ssh2)]:
             if sftp: sftp.close()
             if ssh: ssh.close()
+
+def upload_file_task(config, relative_path, content, q_out, server_name):
+    """
+    Uploads content to a file on an SFTP server.
+    """
+    ssh, sftp = None, None
+    try:
+        q_out.put(f"({server_name}) Connecting to {config['host']}...")
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(config['host'], port=int(config['port']), username=config['user'], password=config['pass'], timeout=10)
+        sftp = ssh.open_sftp()
+        
+        full_path = f"{config['path'].rstrip('/')}/{relative_path}"
+        q_out.put(f"({server_name}) Uploading to: {relative_path}")
+        
+        with sftp.open(full_path, 'w') as f:
+            f.write(content)
+            
+        q_out.put({'status': 'upload_complete', 'server': server_name, 'success': True})
+        q_out.put(f"({server_name}) Upload successful.")
+        
+    except Exception as e:
+        q_out.put(e)
+    finally:
+        if sftp: sftp.close()
+        if ssh: ssh.close()
+
+def sync_single_file_task(s1_config, s2_config, relative_path, q_out):
+    """
+    Synchronizes a single file from TEST (s1) to PROD (s2).
+    """
+    ssh1, sftp1, ssh2, sftp2 = None, None, None, None
+    try:
+        q_out.put(f"Connecting to servers to sync {relative_path}...")
+        
+        # Connect to TEST
+        ssh1 = paramiko.SSHClient()
+        ssh1.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh1.connect(s1_config['host'], port=int(s1_config['port']), username=s1_config['user'], password=s1_config['pass'], timeout=10)
+        sftp1 = ssh1.open_sftp()
+        
+        # Connect to PROD
+        ssh2 = paramiko.SSHClient()
+        ssh2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh2.connect(s2_config['host'], port=int(s2_config['port']), username=s2_config['user'], password=s2_config['pass'], timeout=10)
+        sftp2 = ssh2.open_sftp()
+        
+        test_full_path = f"{s1_config['path'].rstrip('/')}/{relative_path}"
+        prod_full_path = f"{s2_config['path'].rstrip('/')}/{relative_path}"
+        
+        q_out.put(f"Syncing file: {relative_path}...")
+        
+        # Ensure parent directory exists on PROD
+        parent_dir = os.path.dirname(prod_full_path)
+        try:
+            sftp2.stat(parent_dir)
+        except FileNotFoundError:
+            # Simple recursive mkdir (might fail if multiple levels missing, but good enough for now)
+            q_out.put(f"Creating parent directory on PROD: {parent_dir}")
+            try:
+                sftp2.mkdir(parent_dir)
+            except Exception:
+                pass 
+
+        with sftp1.open(test_full_path, 'rb') as f_test:
+            sftp2.putfo(f_test, prod_full_path)
+            
+        # Try to sync permissions if possible
+        try:
+            test_stat = sftp1.stat(test_full_path)
+            sftp2.chmod(prod_full_path, test_stat.st_mode)
+        except Exception as e:
+            q_out.put(f"Warning: Could not sync attributes: {e}")
+
+        q_out.put({'status': 'single_sync_complete', 'success': True, 'file': relative_path})
+        q_out.put(f"Successfully synced {relative_path} to PROD.")
+
+    except Exception as e:
+        q_out.put(e)
+    finally:
+        for sftp, ssh in [(sftp1, ssh1), (sftp2, ssh2)]:
+            if sftp: sftp.close()
+            if ssh: ssh.close()
