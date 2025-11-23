@@ -2,6 +2,9 @@ import customtkinter as ctk
 from tkinter import ttk, messagebox, filedialog
 import threading
 import queue
+import json
+import os
+import webbrowser
 import difflib
 
 import sftp_logic
@@ -22,24 +25,38 @@ class App(ctk.CTk):
         self.server1_vars = {}
         self.server2_vars = {}
 
+        # Clone Options (Moved to Menu)
+        self.clone_options = {
+            "host": ctk.BooleanVar(value=True),
+            "user": ctk.BooleanVar(value=True),
+            "pass": ctk.BooleanVar(value=True),
+            "path": ctk.BooleanVar(value=True),
+            "port": ctk.BooleanVar(value=True)
+        }
+
+        # --- Menu Bar (Custom) ---
+        self.create_custom_menubar()
+
         # --- Main Layout ---
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1) # Results row
+        self.grid_rowconfigure(3, weight=1) # Results row (shifted to 3)
 
         input_frame = ctk.CTkFrame(self, fg_color="transparent")
-        input_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+        input_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5) # Shifted to 1
         input_frame.grid_columnconfigure((0, 1), weight=1)
 
         self.server1_vars = self.create_server_widgets(input_frame, "TEST Server", 0)
         self.server2_vars = self.create_server_widgets(input_frame, "PRODUCTION Server", 1)
 
         # Trace "clone" variables
-        self.server1_vars["user"].trace_add("write", self.on_clone_input)
-        self.server1_vars["pass"].trace_add("write", self.on_clone_input)
-        self.server1_vars["path"].trace_add("write", self.on_clone_input)
+        self.server1_vars["host"].trace_add("write", lambda *args: self.on_clone_input("host"))
+        self.server1_vars["user"].trace_add("write", lambda *args: self.on_clone_input("user"))
+        self.server1_vars["pass"].trace_add("write", lambda *args: self.on_clone_input("pass"))
+        self.server1_vars["path"].trace_add("write", lambda *args: self.on_clone_input("path"))
+        self.server1_vars["port"].trace_add("write", lambda *args: self.on_clone_input("port"))
 
         control_frame = ctk.CTkFrame(self)
-        control_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
+        control_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5) # Shifted to 2
         control_frame.grid_columnconfigure(0, weight=1)
 
         # Button sub-frame
@@ -55,29 +72,21 @@ class App(ctk.CTk):
         self.diff_button = ctk.CTkButton(button_subframe, text="Compare Selected File", command=self.open_diff_window, state="disabled")
         self.diff_button.pack(side="left")
 
-        # Clone Checkbox
+        # Clone Checkbox (Moved to Menu)
         self.clone_var = ctk.BooleanVar(value=False)
-        self.clone_check = ctk.CTkCheckBox(control_frame, text="Clone TEST input (User, Pass, Path) to PRODUCTION", variable=self.clone_var)
-        self.clone_check.grid(row=1, column=0, sticky="w", padx=10, pady=5)
+        
+        # Theme switcher (Moved to Menu)
 
-        # Theme switcher
-        self.theme_menu = ctk.CTkOptionMenu(
-            control_frame,
-            values=["Light", "Dark", "System"],
-            command=self.change_appearance_mode
-        )
-        self.theme_menu.grid(row=0, column=1, sticky="e", padx=10, pady=5)
-        self.theme_menu.set("System")
 
         result_frame = ctk.CTkFrame(self)
-        result_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        result_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 10)) # Shifted to 3
         result_frame.grid_rowconfigure(0, weight=1)
         result_frame.grid_columnconfigure(0, weight=1)
 
         self.create_treeview(result_frame)
 
         status_frame = ctk.CTkFrame(self, height=30)
-        status_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(5, 10))
+        status_frame.grid(row=4, column=0, sticky="ew", padx=10, pady=(5, 10)) # Shifted to 4
         
         self.status_var = ctk.StringVar(value="Ready (Using SFTP).")
         self.status_label = ctk.CTkLabel(status_frame, textvariable=self.status_var, anchor="w")
@@ -88,7 +97,129 @@ class App(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_bar.configure(mode="indeterminate")
 
+    def create_custom_menubar(self):
+        """Creates a custom menu bar using CTkFrame and Buttons."""
+        menubar_frame = ctk.CTkFrame(self, height=30, corner_radius=0, fg_color=("gray85", "gray17"))
+        menubar_frame.grid(row=0, column=0, sticky="ew")
+        
+        # File Menu
+        self.file_btn = ctk.CTkButton(menubar_frame, text="File", width=60, fg_color="transparent", text_color=("black", "white"), hover_color=("gray70", "gray25"), command=self.show_file_menu)
+        self.file_btn.pack(side="left", padx=2)
+        
+        # Settings Menu
+        self.settings_btn = ctk.CTkButton(menubar_frame, text="Settings", width=80, fg_color="transparent", text_color=("black", "white"), hover_color=("gray70", "gray25"), command=self.show_settings_menu)
+        self.settings_btn.pack(side="left", padx=2)
+        
+        # About Menu
+        self.about_btn = ctk.CTkButton(menubar_frame, text="About", width=60, fg_color="transparent", text_color=("black", "white"), hover_color=("gray70", "gray25"), command=lambda: webbrowser.open("https://github.com/Negatorto/mino"))
+        self.about_btn.pack(side="left", padx=2)
 
+    def show_file_menu(self):
+        from tkinter import Menu
+        menu = Menu(self, tearoff=0)
+        menu.add_command(label="Save Workspace (Safe)", command=self.save_workspace_safe)
+        menu.add_command(label="Save Sensitive Workspace (With Passwords)", command=self.save_workspace_sensitive)
+        menu.add_command(label="Load Workspace", command=self.load_workspace)
+        menu.add_separator()
+        menu.add_command(label="Exit", command=self.quit)
+        
+        # Position menu below the button
+        x = self.file_btn.winfo_rootx()
+        y = self.file_btn.winfo_rooty() + self.file_btn.winfo_height()
+        menu.tk_popup(x, y)
+
+    def show_settings_menu(self):
+        from tkinter import Menu
+        menu = Menu(self, tearoff=0)
+        menu.add_command(label="Clone Options...", command=self.open_clone_settings)
+        
+        # Appearance Mode (Light/Dark)
+        theme_menu = Menu(menu, tearoff=0)
+        menu.add_cascade(label="Themes", menu=theme_menu)
+        theme_menu.add_command(label="Light", command=lambda: self.change_appearance_mode("Light"))
+        theme_menu.add_command(label="Dark", command=lambda: self.change_appearance_mode("Dark"))
+        theme_menu.add_command(label="System", command=lambda: self.change_appearance_mode("System"))
+        
+        x = self.settings_btn.winfo_rootx()
+        y = self.settings_btn.winfo_rooty() + self.settings_btn.winfo_height()
+        menu.tk_popup(x, y)
+
+    def save_workspace_safe(self):
+        """Saves configuration excluding passwords."""
+        self._save_workspace(include_passwords=False)
+
+    def save_workspace_sensitive(self):
+        """Saves configuration including passwords."""
+        self._save_workspace(include_passwords=True)
+
+    def _save_workspace(self, include_passwords=False):
+        """Internal method to save workspace."""
+        title = "Save Sensitive Workspace" if include_passwords else "Save Workspace"
+        file_path = filedialog.asksaveasfilename(
+            initialdir="workspaces",
+            title=title,
+            defaultextension=".json",
+            filetypes=(("JSON Files", "*.json"), ("All Files", "*.*"))
+        )
+        if not file_path:
+            return
+
+        s1_data = {k: v.get() for k, v in self.server1_vars.items()}
+        s2_data = {k: v.get() for k, v in self.server2_vars.items()}
+
+        if not include_passwords:
+            s1_data["pass"] = ""
+            s2_data["pass"] = ""
+
+        data = {
+            "server1": s1_data,
+            "server2": s2_data,
+            "clone_options": {k: v.get() for k, v in self.clone_options.items()}
+        }
+
+        try:
+            with open(file_path, 'w') as f:
+                json.dump(data, f, indent=4)
+            self.update_status(f"Workspace saved to {os.path.basename(file_path)}")
+        except Exception as e:
+            self.show_error("Save Error", f"Could not save workspace:\n{e}")
+
+    def load_workspace(self):
+        """Loads server configurations from a JSON file."""
+        file_path = filedialog.askopenfilename(
+            initialdir="workspaces",
+            title="Load Workspace",
+            filetypes=(("JSON Files", "*.json"), ("All Files", "*.*"))
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+
+            s1_data = data.get("server1", {})
+            s2_data = data.get("server2", {})
+            
+            for k, v in s1_data.items():
+                if k in self.server1_vars:
+                    self.server1_vars[k].set(v)
+            
+            for k, v in s2_data.items():
+                if k in self.server2_vars:
+                    self.server2_vars[k].set(v)
+
+            if "clone_options" in data:
+                for k, v in data["clone_options"].items():
+                    if k in self.clone_options:
+                        self.clone_options[k].set(v)
+            elif "clone_enabled" in data: # Backwards compatibility
+                 val = data["clone_enabled"]
+                 for v in self.clone_options.values(): v.set(val)
+
+            self.update_status(f"Workspace loaded from {os.path.basename(file_path)}")
+        except Exception as e:
+            self.show_error("Load Error", f"Could not load workspace:\n{e}")
     def create_server_widgets(self, parent, title, col):
         """Creates the input widgets for a server."""
         frame = ctk.CTkFrame(parent, border_width=1)
@@ -172,7 +303,7 @@ class App(ctk.CTk):
             if len(selected_items) == 1:
                 item_data = self.tree.item(selected_items[0])
                 status = item_data['values'][0] if item_data['values'] else ""
-                if status == "DIFFERENT":
+                if status in ["DIFFERENT", "IDENTICAL"]:
                     can_diff = True
             
             if can_diff:
@@ -180,12 +311,64 @@ class App(ctk.CTk):
             else:
                 context_menu.add_command(label="Compare Selected File", state="disabled")
 
+            # "Sync File" option
+            if len(selected_items) == 1:
+                item_data = self.tree.item(selected_items[0])
+                status = item_data['values'][0] if item_data['values'] else ""
+                # Allow sync if file is different or only on test
+                if status in ["DIFFERENT", "ONLY ON TEST"]:
+                     context_menu.add_command(label="Sync File (TEST -> PROD)", command=lambda: self.sync_single_file(selected_items[0]))
+                else:
+                     context_menu.add_command(label="Sync File (TEST -> PROD)", state="disabled")
+
             # "Change Attributes..." is always available for selected items
             context_menu.add_command(label="Change Attributes...", command=lambda: self.open_attributes_window(selected_items))
             context_menu.tk_popup(event.x_root, event.y_root)
 
         except Exception as e:
             print(f"Error showing context menu: {e}")
+
+    def sync_single_file(self, item_id):
+        """Starts the single file sync process."""
+        item_data = self.tree.item(item_id)
+        values = item_data['values']
+        relative_path = values[1]
+        
+        if not messagebox.askyesno("Confirm Sync", f"Are you sure you want to overwrite/copy '{relative_path}' to PRODUCTION?", parent=self):
+            return
+
+        self.update_status(f"Syncing {relative_path}...")
+        self.progress_bar.start()
+        
+        s1_config = {k: v.get() for k, v in self.server1_vars.items()}
+        s2_config = {k: v.get() for k, v in self.server2_vars.items()}
+        
+        threading.Thread(target=sftp_logic.sync_single_file_task, args=(s1_config, s2_config, relative_path, self.result_queue), daemon=True).start()
+        self.after(100, self.check_single_sync_queue)
+
+    def check_single_sync_queue(self):
+        """Checks the queue for single file sync results."""
+        try:
+            result = self.result_queue.get_nowait()
+            
+            if isinstance(result, Exception):
+                self.show_error("Sync Error", f"An error occurred:\n{result}")
+                self.stop_loading()
+            elif isinstance(result, str):
+                 self.update_status(result)
+                 self.after(100, self.check_single_sync_queue)
+            elif isinstance(result, dict) and result.get('status') == 'single_sync_complete':
+                self.update_status(f"Synced {result.get('file')} successfully.")
+                self.stop_loading()
+                # Ideally, we should update the tree item status here to "IDENTICAL"
+                # For now, let's just show a message, or maybe trigger a refresh if user wants
+                if messagebox.askyesno("Sync Complete", "File synced. Refresh comparison?", parent=self):
+                    self.start_comparison()
+        except queue.Empty:
+            self.after(100, self.check_single_sync_queue)
+        except Exception as e:
+            self.show_error("GUI Error", f"Error updating UI: {e}")
+            self.stop_loading()
 
     def update_treeview_style(self, mode):
         """Updates the ttk.Treeview style to match the CTk theme."""
@@ -218,12 +401,10 @@ class App(ctk.CTk):
         self.update_treeview_style(new_mode_str)
         self.update_treeview_tag_colors(new_mode_str)
 
-    def on_clone_input(self, *args):
-        """Clones input from TEST to PROD if checkbox is active."""
-        if self.clone_var.get():
-            self.server2_vars["user"].set(self.server1_vars["user"].get())
-            self.server2_vars["pass"].set(self.server1_vars["pass"].get())
-            self.server2_vars["path"].set(self.server1_vars["path"].get())
+    def on_clone_input(self, field_key):
+        """Clones input from TEST to PROD if the specific option is active."""
+        if self.clone_options.get(field_key) and self.clone_options[field_key].get():
+            self.server2_vars[field_key].set(self.server1_vars[field_key].get())
 
     def on_tree_select(self, event):
         """Enables Diff button only if a 'DIFFERENT' item is selected."""
@@ -235,7 +416,7 @@ class App(ctk.CTk):
         item = self.tree.item(selected_items[0])
         status = item['values'][0] if item['values'] else ""
         
-        if status == "DIFFERENT":
+        if status in ["DIFFERENT", "IDENTICAL"]:
             self.diff_button.configure(state="normal")
         else:
             self.diff_button.configure(state="disabled")
@@ -289,6 +470,14 @@ class App(ctk.CTk):
         sync_top_level.geometry("600x550")
         sync_top_level.transient(self)
         SyncWindow(sync_top_level, s1_config, s2_config, self.comparison_results, self.start_comparison)
+
+    def open_clone_settings(self):
+        """Opens the Clone Settings popup window."""
+        clone_top_level = ctk.CTkToplevel(self)
+        clone_top_level.title("Clone Options")
+        clone_top_level.geometry("300x250")
+        clone_top_level.transient(self)
+        CloneSettingsWindow(clone_top_level, self.clone_options, self.on_clone_input)
 
     def update_status(self, message):
         """Thread-safe method to update the status label."""
@@ -440,6 +629,12 @@ class DiffWindow(ctk.CTkFrame):
         self.show_metadata_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(control_frame, text="Show Metadata", variable=self.show_metadata_var, command=self.toggle_metadata_visibility).pack(side="left", padx=10)
 
+        self.edit_test_btn = ctk.CTkButton(control_frame, text="Edit TEST", width=80, command=lambda: self.open_editor("TEST"))
+        self.edit_test_btn.pack(side="left", padx=10)
+        
+        self.edit_prod_btn = ctk.CTkButton(control_frame, text="Edit PROD", width=80, command=lambda: self.open_editor("PROD"))
+        self.edit_prod_btn.pack(side="left", padx=10)
+
         self.status_var = ctk.StringVar(value=f"Loading file: {self.relative_path}...")
         ctk.CTkLabel(control_frame, textvariable=self.status_var, anchor="e").pack(side="right", fill="x", expand=True)
 
@@ -463,6 +658,35 @@ class DiffWindow(ctk.CTkFrame):
 
         self.toggle_metadata_visibility() # Set initial state
 
+        threading.Thread(target=sftp_logic.download_file_task, args=(self.s1_config, self.relative_path, self.diff_queue, "TEST"), daemon=True).start()
+        threading.Thread(target=sftp_logic.download_file_task, args=(self.s2_config, self.relative_path, self.diff_queue, "PROD"), daemon=True).start()
+        self.after(100, self.check_diff_queue)
+
+    def open_editor(self, server_name):
+        content = self.file_contents.get(server_name)
+        if content is None:
+            messagebox.showerror("Error", f"File content for {server_name} is not loaded yet.", parent=self)
+            return
+            
+        config = self.s1_config if server_name == "TEST" else self.s2_config
+        
+        editor_top = ctk.CTkToplevel(self)
+        editor_top.title(f"Edit {server_name}: {self.relative_path}")
+        editor_top.geometry("800x600")
+        editor_top.transient(self)
+        
+        EditorWindow(editor_top, config, self.relative_path, content, server_name, self.refresh_diff)
+
+    def refresh_diff(self):
+        """Reloads the files and refreshes the diff."""
+        self.status_var.set("Reloading files...")
+        self.file_contents = {"TEST": None, "PROD": None}
+        self.diff_result = []
+        
+        # Clear text areas
+        self.text1.configure(state="normal"); self.text1.delete("1.0", "end"); self.text1.configure(state="disabled")
+        self.text2.configure(state="normal"); self.text2.delete("1.0", "end"); self.text2.configure(state="disabled")
+        
         threading.Thread(target=sftp_logic.download_file_task, args=(self.s1_config, self.relative_path, self.diff_queue, "TEST"), daemon=True).start()
         threading.Thread(target=sftp_logic.download_file_task, args=(self.s2_config, self.relative_path, self.diff_queue, "PROD"), daemon=True).start()
         self.after(100, self.check_diff_queue)
@@ -614,6 +838,43 @@ class DiffWindow(ctk.CTkFrame):
                 self.text2.tag_add('highlight_inline', f"{line2_start} + {j1}c", f"{line2_start} + {j2}c")
 
 
+class CloneSettingsWindow(ctk.CTkFrame):
+    """
+    A Toplevel window for managing clone options.
+    """
+    def __init__(self, parent_toplevel, clone_options, on_change_callback):
+        super().__init__(parent_toplevel)
+        self.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        self.clone_options = clone_options
+        self.on_change_callback = on_change_callback
+
+        ctk.CTkLabel(self, text="Select fields to clone from TEST to PROD:", font=ctk.CTkFont(weight="bold")).pack(pady=(0, 10))
+
+        # Create checkboxes for each option
+        # We use a specific order for better UX
+        order = ["host", "port", "user", "pass", "path"]
+        labels = {
+            "host": "Host / URL",
+            "port": "Port",
+            "user": "Username",
+            "pass": "Password",
+            "path": "Remote Path"
+        }
+
+        for key in order:
+            if key in self.clone_options:
+                cb = ctk.CTkCheckBox(
+                    self, 
+                    text=labels.get(key, key), 
+                    variable=self.clone_options[key],
+                    command=lambda k=key: self.on_change_callback(k)
+                )
+                cb.pack(anchor="w", pady=5, padx=20)
+        
+        ctk.CTkButton(self, text="Close", command=parent_toplevel.destroy).pack(pady=(20, 0))
+
+
 class AttributesWindow(ctk.CTkFrame):
     """
     A Toplevel window for changing file owner and permissions.
@@ -634,6 +895,8 @@ class AttributesWindow(ctk.CTkFrame):
         current_owner, current_group = owner_group.split(':', 1) if ':' in owner_group else (owner_group, "")
         
         self.owner_var = ctk.StringVar(value=current_owner.split(' -> ')[0])
+
+
         self.group_var = ctk.StringVar(value=current_group.split(' -> ')[0])
         self.new_perms = ctk.StringVar(value=octal_perms.split(' -> ')[0]) # Initialize with octal
         
@@ -1019,3 +1282,65 @@ class SyncWindow(ctk.CTkFrame):
 
     def show_error(self, title, message):
         messagebox.showerror(title, message, parent=self.parent_toplevel)
+
+class EditorWindow(ctk.CTkFrame):
+    """
+    A Toplevel window for editing a single file.
+    """
+    def __init__(self, parent_toplevel, config, relative_path, content, server_name, on_save_callback):
+        super().__init__(parent_toplevel)
+        self.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        self.config = config
+        self.relative_path = relative_path
+        self.server_name = server_name
+        self.on_save_callback = on_save_callback
+        
+        self.upload_queue = queue.Queue()
+
+        # Header
+        header_frame = ctk.CTkFrame(self, fg_color="transparent")
+        header_frame.pack(fill="x", pady=(0, 10))
+        
+        ctk.CTkLabel(header_frame, text=f"Editing: {relative_path} ({server_name})", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        
+        self.save_button = ctk.CTkButton(header_frame, text="Save & Upload", command=self.start_upload)
+        self.save_button.pack(side="right")
+
+        # Text Editor
+        self.text_area = ctk.CTkTextbox(self, wrap="none", font=("monospace", 12))
+        self.text_area.pack(fill="both", expand=True)
+        self.text_area.insert("1.0", content)
+
+        # Status Bar
+        self.status_label = ctk.CTkLabel(self, text="Ready to edit.", anchor="w")
+        self.status_label.pack(fill="x", pady=(5, 0))
+
+    def start_upload(self):
+        """Starts the upload process."""
+        content = self.text_area.get("1.0", "end-1c") # Get all text except the last newline
+        self.save_button.configure(state="disabled")
+        self.status_label.configure(text="Uploading...")
+        
+        threading.Thread(target=sftp_logic.upload_file_task, args=(self.config, self.relative_path, content, self.upload_queue, self.server_name), daemon=True).start()
+        self.after(100, self.check_upload_queue)
+
+    def check_upload_queue(self):
+        """Checks the upload status."""
+        try:
+            result = self.upload_queue.get_nowait()
+            
+            if isinstance(result, Exception):
+                messagebox.showerror("Upload Error", f"Failed to upload file:\n{result}", parent=self)
+                self.status_label.configure(text="Upload failed.")
+                self.save_button.configure(state="normal")
+            elif isinstance(result, str):
+                self.status_label.configure(text=result)
+                self.after(100, self.check_upload_queue)
+            elif isinstance(result, dict) and result.get('status') == 'upload_complete':
+                messagebox.showinfo("Success", "File saved and uploaded successfully.", parent=self)
+                self.on_save_callback() # Refresh the diff
+                self.winfo_toplevel().destroy() # Close editor
+                
+        except queue.Empty:
+            self.after(100, self.check_upload_queue)
