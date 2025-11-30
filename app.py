@@ -6,6 +6,12 @@ import json
 import os
 import webbrowser
 import difflib
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    print("Warning: PIL.ImageTk not available. Icon will not be loaded.")
+    Image = None
+    ImageTk = None
 
 import sftp_logic
 
@@ -18,6 +24,30 @@ class App(ctk.CTk):
 
         self.title("MINO: Mirroring Integrity Network Operations")
         self.geometry("900x700")
+
+        # --- Icon Setup ---
+        # Absolute path to assets directory
+        assets_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets")
+        
+        # 1. For Windows (.ico)
+        try:
+            icon_path_ico = os.path.join(assets_path, "mino.ico")
+            if os.path.exists(icon_path_ico):
+                self.iconbitmap(icon_path_ico)
+        except Exception:
+            pass # Ignore errors on non-Windows systems or if file issues
+
+        # 2. For Linux/macOS (.png)
+        if Image and ImageTk:
+            try:
+                icon_path_png = os.path.join(assets_path, "mino_icon.png")
+                if os.path.exists(icon_path_png):
+                    icon_img = Image.open(icon_path_png)
+                    self.iconphoto(False, ImageTk.PhotoImage(icon_img))
+            except Exception as e:
+                print(f"Error loading icon: {e}")
+        else:
+             print("Skipping icon load: PIL.ImageTk not available.")
 
         # --- Data ---
         self.result_queue = queue.Queue()
@@ -384,8 +414,6 @@ class App(ctk.CTk):
             elif isinstance(result, dict) and result.get('status') == 'single_sync_complete':
                 self.update_status(f"Synced {result.get('file')} successfully.")
                 self.stop_loading()
-                # Ideally, we should update the tree item status here to "IDENTICAL"
-                # For now, let's just show a message, or maybe trigger a refresh if user wants
                 if messagebox.askyesno("Sync Complete", "File synced. Refresh comparison?", parent=self):
                     self.start_comparison()
         except queue.Empty:
