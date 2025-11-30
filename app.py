@@ -312,14 +312,19 @@ class App(ctk.CTk):
                 context_menu.add_command(label="Compare Selected File", state="disabled")
 
             # "Sync File" option
-            if len(selected_items) == 1:
-                item_data = self.tree.item(selected_items[0])
+            syncable_items = []
+            for item_id in selected_items:
+                item_data = self.tree.item(item_id)
                 status = item_data['values'][0] if item_data['values'] else ""
-                # Allow sync if file is different or only on test
                 if status in ["DIFFERENT", "ONLY ON TEST"]:
-                     context_menu.add_command(label="Sync File (TEST -> PROD)", command=lambda: self.sync_single_file(selected_items[0]))
-                else:
-                     context_menu.add_command(label="Sync File (TEST -> PROD)", state="disabled")
+                    syncable_items.append(item_id)
+
+            if len(syncable_items) == 1:
+                 context_menu.add_command(label="Sync File (TEST -> PROD)", command=lambda: self.sync_single_file(syncable_items[0]))
+            elif len(syncable_items) > 1:
+                 context_menu.add_command(label=f"Sync Selected Files ({len(syncable_items)})", command=lambda: self.sync_selected_files(syncable_items))
+            else:
+                 context_menu.add_command(label="Sync File (TEST -> PROD)", state="disabled")
 
             # "Change Attributes..." is always available for selected items
             context_menu.add_command(label="Change Attributes...", command=lambda: self.open_attributes_window(selected_items))
@@ -346,6 +351,25 @@ class App(ctk.CTk):
         threading.Thread(target=sftp_logic.sync_single_file_task, args=(s1_config, s2_config, relative_path, self.result_queue), daemon=True).start()
         self.after(100, self.check_single_sync_queue)
 
+    def sync_selected_files(self, item_ids):
+        """Starts the batch sync process for selected files."""
+        files_to_sync = []
+        for item_id in item_ids:
+            values = self.tree.item(item_id)['values']
+            files_to_sync.append(values[1]) # relative_path
+        
+        if not messagebox.askyesno("Confirm Batch Sync", f"Are you sure you want to sync {len(files_to_sync)} files to PRODUCTION?", parent=self):
+            return
+
+        self.update_status(f"Starting batch sync for {len(files_to_sync)} files...")
+        self.progress_bar.start()
+        
+        s1_config = {k: v.get() for k, v in self.server1_vars.items()}
+        s2_config = {k: v.get() for k, v in self.server2_vars.items()}
+        
+        threading.Thread(target=sftp_logic.sync_multiple_files_task, args=(s1_config, s2_config, files_to_sync, self.result_queue), daemon=True).start()
+        self.after(100, self.check_batch_sync_queue)
+
     def check_single_sync_queue(self):
         """Checks the queue for single file sync results."""
         try:
@@ -366,6 +390,31 @@ class App(ctk.CTk):
                     self.start_comparison()
         except queue.Empty:
             self.after(100, self.check_single_sync_queue)
+        except Exception as e:
+            self.show_error("GUI Error", f"Error updating UI: {e}")
+            self.stop_loading()
+
+    def check_batch_sync_queue(self):
+        """Checks the queue for batch sync results."""
+        try:
+            result = self.result_queue.get_nowait()
+            
+            if isinstance(result, Exception):
+                self.show_error("Sync Error", f"An error occurred:\n{result}")
+                self.stop_loading()
+            elif isinstance(result, str):
+                 self.update_status(result)
+                 self.after(100, self.check_batch_sync_queue)
+            elif isinstance(result, dict):
+                if result.get('status') == 'single_sync_complete':
+                    self.update_status(f"Synced {result.get('file')} successfully.")
+                    self.after(100, self.check_batch_sync_queue)
+                elif result.get('status') == 'batch_sync_complete':
+                    self.stop_loading()
+                    if messagebox.askyesno("Batch Sync Complete", "All selected files synced. Refresh comparison?", parent=self):
+                        self.start_comparison()
+        except queue.Empty:
+            self.after(100, self.check_batch_sync_queue)
         except Exception as e:
             self.show_error("GUI Error", f"Error updating UI: {e}")
             self.stop_loading()

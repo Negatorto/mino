@@ -544,3 +544,66 @@ def sync_single_file_task(s1_config, s2_config, relative_path, q_out):
         for sftp, ssh in [(sftp1, ssh1), (sftp2, ssh2)]:
             if sftp: sftp.close()
             if ssh: ssh.close()
+
+def sync_multiple_files_task(s1_config, s2_config, relative_paths_list, q_out):
+    """
+    Synchronizes multiple files from TEST (s1) to PROD (s2) using a single connection.
+    """
+    ssh1, sftp1, ssh2, sftp2 = None, None, None, None
+    try:
+        q_out.put(f"Connecting to servers to sync {len(relative_paths_list)} files...")
+        
+        # Connect to TEST
+        ssh1 = paramiko.SSHClient()
+        ssh1.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh1.connect(s1_config['host'], port=int(s1_config['port']), username=s1_config['user'], password=s1_config['pass'], timeout=10)
+        sftp1 = ssh1.open_sftp()
+        
+        # Connect to PROD
+        ssh2 = paramiko.SSHClient()
+        ssh2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh2.connect(s2_config['host'], port=int(s2_config['port']), username=s2_config['user'], password=s2_config['pass'], timeout=10)
+        sftp2 = ssh2.open_sftp()
+        
+        total = len(relative_paths_list)
+        for i, relative_path in enumerate(relative_paths_list):
+            try:
+                test_full_path = f"{s1_config['path'].rstrip('/')}/{relative_path}"
+                prod_full_path = f"{s2_config['path'].rstrip('/')}/{relative_path}"
+                
+                q_out.put(f"({i+1}/{total}) Syncing: {relative_path}")
+                
+                # Ensure parent directory exists on PROD
+                parent_dir = os.path.dirname(prod_full_path)
+                try:
+                    sftp2.stat(parent_dir)
+                except FileNotFoundError:
+                    try:
+                        sftp2.mkdir(parent_dir)
+                    except Exception:
+                        pass 
+
+                with sftp1.open(test_full_path, 'rb') as f_test:
+                    sftp2.putfo(f_test, prod_full_path)
+                    
+                # Try to sync permissions if possible
+                try:
+                    test_stat = sftp1.stat(test_full_path)
+                    sftp2.chmod(prod_full_path, test_stat.st_mode)
+                except Exception as e:
+                    q_out.put(f"Warning: Could not sync attributes for {relative_path}: {e}")
+                
+                q_out.put({'status': 'single_sync_complete', 'success': True, 'file': relative_path})
+
+            except Exception as e:
+                q_out.put(f"Error syncing {relative_path}: {e}")
+
+        q_out.put({'status': 'batch_sync_complete', 'success': True})
+        q_out.put("Batch sync complete.")
+
+    except Exception as e:
+        q_out.put(e)
+    finally:
+        for sftp, ssh in [(sftp1, ssh1), (sftp2, ssh2)]:
+            if sftp: sftp.close()
+            if ssh: ssh.close()
