@@ -6,6 +6,8 @@ import json
 import os
 import webbrowser
 import difflib
+import subprocess
+import platform
 try:
     from PIL import Image, ImageTk
 except ImportError:
@@ -104,6 +106,7 @@ class App(ctk.CTk):
 
         # Clone Checkbox (Moved to Menu)
         self.clone_var = ctk.BooleanVar(value=False)
+        self.scan_notes_var = ctk.BooleanVar(value=False)
         
         # Theme switcher (Moved to Menu)
 
@@ -141,7 +144,7 @@ class App(ctk.CTk):
         self.settings_btn.pack(side="left", padx=2)
         
         # About Menu
-        self.about_btn = ctk.CTkButton(menubar_frame, text="About", width=60, fg_color="transparent", text_color=("black", "white"), hover_color=("gray70", "gray25"), command=lambda: webbrowser.open("https://github.com/Negatorto/mino"))
+        self.about_btn = ctk.CTkButton(menubar_frame, text="About", width=60, fg_color="transparent", text_color=("black", "white"), hover_color=("gray70", "gray25"), command=self.open_about_window)
         self.about_btn.pack(side="left", padx=2)
 
     def show_file_menu(self):
@@ -162,6 +165,7 @@ class App(ctk.CTk):
         from tkinter import Menu
         menu = Menu(self, tearoff=0)
         menu.add_command(label="Clone Options...", command=self.open_clone_settings)
+        menu.add_checkbutton(label="Scan for 'MINO' Notes", variable=self.scan_notes_var)
         
         # Appearance Mode (Light/Dark)
         theme_menu = Menu(menu, tearoff=0)
@@ -204,7 +208,8 @@ class App(ctk.CTk):
         data = {
             "server1": s1_data,
             "server2": s2_data,
-            "clone_options": {k: v.get() for k, v in self.clone_options.items()}
+            "clone_options": {k: v.get() for k, v in self.clone_options.items()},
+            "scan_notes": self.scan_notes_var.get()
         }
 
         try:
@@ -247,6 +252,9 @@ class App(ctk.CTk):
                  val = data["clone_enabled"]
                  for v in self.clone_options.values(): v.set(val)
 
+            if "scan_notes" in data:
+                self.scan_notes_var.set(data["scan_notes"])
+
             self.update_status(f"Workspace loaded from {os.path.basename(file_path)}")
         except Exception as e:
             self.show_error("Load Error", f"Could not load workspace:\n{e}")
@@ -286,15 +294,17 @@ class App(ctk.CTk):
     def create_treeview(self, parent):
         """Creates and styles the results Treeview."""
         self.style = ttk.Style(self)
-        self.tree = ttk.Treeview(parent, columns=("Status", "Path", "Owner", "Perms"), show="headings")
+        self.tree = ttk.Treeview(parent, columns=("Status", "Path", "Note", "Owner", "Perms"), show="headings")
         
         self.tree.heading("Status", text="Status")
         self.tree.heading("Path", text="File Path")
+        self.tree.heading("Note", text="Note")
         self.tree.heading("Owner", text="Owner:Group")
         self.tree.heading("Perms", text="Permissions")
         
         self.tree.column("Status", width=150, anchor='w')
         self.tree.column("Path", width=450, anchor='w')
+        self.tree.column("Note", width=60, anchor='center')
         self.tree.column("Owner", width=120, anchor='w')
         self.tree.column("Perms", width=120, anchor='w')
 
@@ -305,6 +315,7 @@ class App(ctk.CTk):
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
+        self.tree.bind('<Double-1>', self.on_tree_double_click)
         self.tree.bind('<Button-3>', self.show_tree_context_menu)
         
         self.update_treeview_style(ctk.get_appearance_mode())
@@ -498,6 +509,18 @@ class App(ctk.CTk):
         else:
             self.diff_button.configure(state="disabled")
 
+    def on_tree_double_click(self, event):
+        """Opens Diff Window on double-click if valid."""
+        selected_items = self.tree.selection()
+        if not selected_items:
+            return
+            
+        item = self.tree.item(selected_items[0])
+        status = item['values'][0] if item['values'] else ""
+        
+        if status in ["DIFFERENT", "IDENTICAL"]:
+            self.open_diff_window()
+
     def open_diff_window(self):
         """Opens the DiffWindow for the selected file."""
         try:
@@ -575,7 +598,7 @@ class App(ctk.CTk):
         s1 = {k: v.get() for k, v in self.server1_vars.items()}
         s2 = {k: v.get() for k, v in self.server2_vars.items()}
 
-        threading.Thread(target=sftp_logic.compare_folders_task, args=(s1, s2, self.result_queue), daemon=True).start()
+        threading.Thread(target=sftp_logic.compare_folders_task, args=(s1, s2, self.result_queue, self.scan_notes_var.get()), daemon=True).start()
         self.after(100, self.check_queue)
 
     def check_queue(self):
@@ -626,21 +649,52 @@ class App(ctk.CTk):
             perms_sym_str = perms1_sym if perms1_sym == perms2_sym else f"{perms1_sym} -> {perms2_sym}"
             perms_oct_str = perms1_oct if perms1_oct == perms2_oct else f"{perms1_oct} -> {perms2_oct}"
             
-            self.tree.insert("", "end", values=("DIFFERENT", f, owner_str, perms_sym_str, perms_oct_str), tags=('different',))
+            owner_str = owner1_str if owner1_str == owner2_str else f"{owner1_str} -> {owner2_str}"
+            perms_sym_str = perms1_sym if perms1_sym == perms2_sym else f"{perms1_sym} -> {perms2_sym}"
+            perms_oct_str = perms1_oct if perms1_oct == perms2_oct else f"{perms1_oct} -> {perms2_oct}"
+            
+            note_str = ""
+            if self.scan_notes_var.get():
+                has_note1 = meta1.get('has_note', False)
+                has_note2 = meta2.get('has_note', False)
+                if has_note1 or has_note2:
+                    note_str = "⚠" # Orange warning
+                else:
+                    note_str = "✓"
+
+            self.tree.insert("", "end", values=("DIFFERENT", f, note_str, owner_str, perms_sym_str, perms_oct_str), tags=('different',))
         
         for f in sorted(results['only_on_1']):
             meta = files_s1_meta.get(f, {})
             owner = f"{meta.get('owner', '?')}:{meta.get('group', '?')}"
             perms_sym = meta.get('mode', '?')
             perms_oct = meta.get('octal_mode', '?')
-            self.tree.insert("", "end", values=("ONLY ON TEST", f, owner, perms_sym, perms_oct), tags=('solo_test',))
+            perms_oct = meta.get('octal_mode', '?')
+
+            note_str = ""
+            if self.scan_notes_var.get():
+                 if meta.get('has_note', False):
+                     note_str = "⚠"
+                 else:
+                     note_str = "✓"
+
+            self.tree.insert("", "end", values=("ONLY ON TEST", f, note_str, owner, perms_sym, perms_oct), tags=('solo_test',))
 
         for f in sorted(results['only_on_2']):
             meta = files_s2_meta.get(f, {})
             owner = f"{meta.get('owner', '?')}:{meta.get('group', '?')}"
             perms_sym = meta.get('mode', '?')
             perms_oct = meta.get('octal_mode', '?')
-            self.tree.insert("", "end", values=("ONLY ON PROD", f, owner, perms_sym, perms_oct), tags=('solo_prod',))
+            perms_oct = meta.get('octal_mode', '?')
+
+            note_str = ""
+            if self.scan_notes_var.get():
+                if meta.get('has_note', False):
+                    note_str = "⚠"
+                else:
+                    note_str = "✓"
+
+            self.tree.insert("", "end", values=("ONLY ON PROD", f, note_str, owner, perms_sym, perms_oct), tags=('solo_prod',))
         
         for f in sorted(results['identical']):
             meta1 = files_s1_meta.get(f, {})
@@ -657,7 +711,20 @@ class App(ctk.CTk):
             perms_sym_str = perms1_sym if perms1_sym == perms2_sym else f"{perms1_sym} -> {perms2_sym}"
             perms_oct_str = perms1_oct if perms1_oct == perms2_oct else f"{perms1_oct} -> {perms2_oct}"
             
-            self.tree.insert("", "end", values=("IDENTICAL", f, owner_str, perms_sym_str, perms_oct_str), tags=('identical',))
+            owner_str = owner1_str if owner1_str == owner2_str else f"{owner1_str} -> {owner2_str}"
+            perms_sym_str = perms1_sym if perms1_sym == perms2_sym else f"{perms1_sym} -> {perms2_sym}"
+            perms_oct_str = perms1_oct if perms1_oct == perms2_oct else f"{perms1_oct} -> {perms2_oct}"
+            
+            note_str = ""
+            if self.scan_notes_var.get():
+                has_note1 = meta1.get('has_note', False)
+                has_note2 = meta2.get('has_note', False)
+                if has_note1 or has_note2:
+                    note_str = "⚠"
+                else:
+                    note_str = "✓"
+
+            self.tree.insert("", "end", values=("IDENTICAL", f, note_str, owner_str, perms_sym_str, perms_oct_str), tags=('identical',))
 
         self.diff_button.configure(state="disabled")
         
@@ -672,6 +739,47 @@ class App(ctk.CTk):
         """Shows a cross-platform error message."""
         messagebox.showerror(title, message, parent=self)
 
+    def open_url(self, url):
+        """Opens a URL, suppressing stderr on Linux to avoid Wayland warnings."""
+        if platform.system() == "Linux":
+            try:
+                # Use xdg-open directly and suppress stderr
+                subprocess.Popen(['xdg-open', url], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            except Exception:
+                webbrowser.open(url) # Fallback
+        else:
+            webbrowser.open(url)
+
+    def open_about_window(self):
+        """Opens the About pop-up."""
+        about_toplevel = ctk.CTkToplevel(self)
+        about_toplevel.title("About MINO")
+        about_toplevel.geometry("340x200")
+        about_toplevel.resizable(False, False)
+        about_toplevel.transient(self) # Make it modal-like on top of main window
+        
+        # Center the window
+        about_toplevel.update_idletasks()
+        width = about_toplevel.winfo_width()
+        height = about_toplevel.winfo_height()
+        x = (about_toplevel.winfo_screenwidth() // 2) - (width // 2)
+        y = (about_toplevel.winfo_screenheight() // 2) - (height // 2)
+        about_toplevel.geometry('{}x{}+{}+{}'.format(width, height, x, y))
+
+        # Content
+        # Title (Bold)
+        ctk.CTkLabel(about_toplevel, text="MINO", font=("Helvetica", 24, "bold")).pack(pady=(20, 2))
+        
+        # Subtitle (Regular font)
+        ctk.CTkLabel(about_toplevel, text="Mirroring Integrity Network Operations", font=("Helvetica", 13)).pack(pady=(0, 10))
+        
+        # Author (Same Regular font)
+        ctk.CTkLabel(about_toplevel, text="Created by Alessio Saponaro", font=("Helvetica", 13)).pack(pady=(0, 15))
+        
+        # Button
+        ctk.CTkButton(about_toplevel, text="View on GitHub", height=30, command=lambda: self.open_url("https://github.com/Negatorto/mino")).pack(pady=5)
+
+
 
 class DiffWindow(ctk.CTkFrame):
     """
@@ -682,8 +790,14 @@ class DiffWindow(ctk.CTkFrame):
         self.pack(fill="both", expand=True)
 
         self.s1_config, self.s2_config = s1_config, s2_config
-        self.status, self.relative_path, self.owner_group, self.symbolic_perms, self.octal_perms = item_values
         
+        # Unpack based on length (Retroactive fix for Note column)
+        if len(item_values) == 6:
+            self.status, self.relative_path, self.note, self.owner_group, self.symbolic_perms, self.octal_perms = item_values
+        else:
+            self.status, self.relative_path, self.owner_group, self.symbolic_perms, self.octal_perms = item_values
+            self.note = ""
+
         self.diff_queue, self.file_contents, self.diff_result = queue.Queue(), {"TEST": None, "PROD": None}, []
 
         # Parse metadata for each server
@@ -967,7 +1081,13 @@ class AttributesWindow(ctk.CTkFrame):
         # Extract data from the first selected item for initial display/defaults
         # The actual changes will be applied to all selected items
         first_item = selected_items_data[0]
-        status, relative_path, owner_group, symbolic_perms, raw_octal_perms = first_item
+        
+        # Retroactive fix for Note column
+        if len(first_item) == 6:
+             status, relative_path, note, owner_group, symbolic_perms, raw_octal_perms = first_item
+        else:
+             status, relative_path, owner_group, symbolic_perms, raw_octal_perms = first_item
+        
         octal_perms = str(raw_octal_perms) # Ensure it's a string
         current_owner, current_group = owner_group.split(':', 1) if ':' in owner_group else (owner_group, "")
         
@@ -1006,7 +1126,9 @@ class AttributesWindow(ctk.CTkFrame):
             ctk.CTkLabel(self, text=f"(Current Owner:Group: {owner_group})", font=ctk.CTkFont(size=10)).grid(row=3, column=1, sticky="w", padx=5)
         else:
             # Check if all selected items have the same owner/group
-            all_same_owner_group = all(item[2] == owner_group for item in self.selected_items_data)
+            # Indices: 2 is owner_group if len=5, but 3 if len=6
+            idx = 3 if len(selected_items_data[0]) == 6 else 2
+            all_same_owner_group = all(item[idx] == owner_group for item in self.selected_items_data)
             if all_same_owner_group:
                 ctk.CTkLabel(self, text=f"(Current Owner:Group: {owner_group})", font=ctk.CTkFont(size=10)).grid(row=3, column=1, sticky="w", padx=5)
             else:
@@ -1020,7 +1142,9 @@ class AttributesWindow(ctk.CTkFrame):
             ctk.CTkLabel(self, text=f"(Current: {symbolic_perms} / {octal_perms})", font=ctk.CTkFont(size=10)).grid(row=5, column=1, sticky="w", padx=5)
         else:
             # Check if all selected items have the same permissions
-            all_same_perms = all(str(item[4]) == octal_perms for item in self.selected_items_data)
+            # Indices: 4 is octal_perms if len=5, but 5 if len=6
+            idx = 5 if len(selected_items_data[0]) == 6 else 4
+            all_same_perms = all(str(item[idx]) == octal_perms for item in self.selected_items_data)
             if all_same_perms:
                 ctk.CTkLabel(self, text=f"(Current: {symbolic_perms} / {octal_perms})", font=ctk.CTkFont(size=10)).grid(row=5, column=1, sticky="w", padx=5)
             else:

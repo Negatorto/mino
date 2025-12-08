@@ -18,6 +18,7 @@ MINO is a powerful and intuitive tool designed to facilitate the synchronization
     *   **Local Backup**: Download a backup of the production folder to your local machine.
 *   **Workspace Management**: Save and load server configurations (Host, User, Path, etc.) to quickly switch between environments. Supports secure password saving.
 *   **Attribute Management**: View and modify file permissions (chmod) and ownership (chown).
+*   **Note Scanning**: Leave notes for MINO directly inside your files. By adding the keyword `MINO` anywhere in a file's content, the application will flag it with a warning icon (⚠) during comparison. This is perfect for marking files that require special attention or manual review. Enable this via "Settings > Scan for 'MINO' Notes".
 
 ## Installation
 

@@ -62,7 +62,7 @@ def _get_name_to_gid_map(sftp):
                 name_map[parts[0]] = int(parts[2])
     return name_map
 
-def scan_sftp_directory(sftp, start_path, q_out, server_name):
+def scan_sftp_directory(sftp, start_path, q_out, server_name, scan_notes=False):
     """
     Recursively scans an SFTP path, returning metadata for files and a list of directories.
     """
@@ -110,13 +110,21 @@ def scan_sftp_directory(sftp, start_path, q_out, server_name):
                         
                         file_hash = hashlib.md5(mem_file.read()).hexdigest()
                         
+                        # --- Note Scanning ---
+                        has_note = False
+                        if scan_notes:
+                            mem_file.seek(0)
+                            if b"MINO" in mem_file.read():
+                                has_note = True
+                        
                         owner_name = uid_map.get(item.st_uid, str(item.st_uid))
                         group_name = gid_map.get(item.st_gid, str(item.st_gid))
 
                         file_metadata[relative_path] = {
                             'hash': file_hash, 'owner': owner_name, 'group': group_name,
                             'mode': stat.filemode(item.st_mode),
-                            'octal_mode': oct(item.st_mode & 0o777)[2:]
+                            'octal_mode': oct(item.st_mode & 0o777)[2:],
+                            'has_note': has_note
                         }
                     except Exception as e:
                         q_out.put(f"({server_name}) File Error {full_path}: {e}")
@@ -126,7 +134,7 @@ def scan_sftp_directory(sftp, start_path, q_out, server_name):
     q_out.put(f"({server_name}) Scan complete. Found {len(file_metadata)} files and {len(dir_paths)} directories.")
     return file_metadata, list(dir_paths)
 
-def compare_folders_task(s1_config, s2_config, q_out):
+def compare_folders_task(s1_config, s2_config, q_out, scan_notes=False):
     """
     Main background task to compare two SFTP folders.
     """
@@ -137,14 +145,14 @@ def compare_folders_task(s1_config, s2_config, q_out):
         ssh1.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh1.connect(s1_config['host'], port=int(s1_config['port']), username=s1_config['user'], password=s1_config['pass'], timeout=10)
         sftp1 = ssh1.open_sftp()
-        files_s1, dirs_s1 = scan_sftp_directory(sftp1, s1_config['path'], q_out, "TEST")
+        files_s1, dirs_s1 = scan_sftp_directory(sftp1, s1_config['path'], q_out, "TEST", scan_notes)
         
         q_out.put(f"Connecting to PRODUCTION Server ({s2_config['host']})...")
         ssh2 = paramiko.SSHClient()
         ssh2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh2.connect(s2_config['host'], port=int(s2_config['port']), username=s2_config['user'], password=s2_config['pass'], timeout=10)
         sftp2 = ssh2.open_sftp()
-        files_s2, dirs_s2 = scan_sftp_directory(sftp2, s2_config['path'], q_out, "PROD")
+        files_s2, dirs_s2 = scan_sftp_directory(sftp2, s2_config['path'], q_out, "PROD", scan_notes)
 
         q_out.put("Comparing file and directory lists...")
         set_files_s1, set_files_s2 = set(files_s1.keys()), set(files_s2.keys())
