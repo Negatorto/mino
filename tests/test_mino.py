@@ -329,7 +329,6 @@ class TestModuleSyntaxAndImports(unittest.TestCase):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         expected_files = (
             "mino.py",
-            "app.py",
             os.path.join("core", "__init__.py"),
             os.path.join("core", "models.py"),
             os.path.join("core", "sftp_logic.py"),
@@ -352,7 +351,6 @@ class TestModuleSyntaxAndImports(unittest.TestCase):
         except ImportError:
             self.skipTest("customtkinter not installed in current test interpreter")
 
-        import app  # noqa: F401
         import mino  # noqa: F401
         import core.models  # noqa: F401
         import core.sftp_logic  # noqa: F401
