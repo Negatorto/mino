@@ -9,8 +9,8 @@ import stat
 import tempfile
 import unittest
 
-from models import ComparisonRow, FileStatus, normalize_octal_display
-import sftp_logic
+from core.models import ComparisonRow, FileStatus, normalize_octal_display
+from core import sftp_logic
 
 
 def drain_all(q: queue.Queue) -> list:
@@ -330,13 +330,16 @@ class TestModuleSyntaxAndImports(unittest.TestCase):
         expected_files = (
             "mino.py",
             "app.py",
-            "models.py",
-            "ui_helpers.py",
-            "sftp_logic.py",
-            "ui_editor.py",
-            "ui_sync.py",
-            "ui_attributes.py",
-            "ui_settings.py",
+            os.path.join("core", "__init__.py"),
+            os.path.join("core", "models.py"),
+            os.path.join("core", "sftp_logic.py"),
+            os.path.join("ui", "__init__.py"),
+            os.path.join("ui", "app.py"),
+            os.path.join("ui", "attributes.py"),
+            os.path.join("ui", "editor.py"),
+            os.path.join("ui", "helpers.py"),
+            os.path.join("ui", "settings.py"),
+            os.path.join("ui", "sync.py"),
         )
         for filename in expected_files:
             full_path = os.path.join(repo_root, filename)
@@ -351,11 +354,14 @@ class TestModuleSyntaxAndImports(unittest.TestCase):
 
         import app  # noqa: F401
         import mino  # noqa: F401
-        import ui_attributes  # noqa: F401
-        import ui_editor  # noqa: F401
-        import ui_helpers  # noqa: F401
-        import ui_settings  # noqa: F401
-        import ui_sync  # noqa: F401
+        import core.models  # noqa: F401
+        import core.sftp_logic  # noqa: F401
+        import ui.app  # noqa: F401
+        import ui.attributes  # noqa: F401
+        import ui.editor  # noqa: F401
+        import ui.helpers  # noqa: F401
+        import ui.settings  # noqa: F401
+        import ui.sync  # noqa: F401
 
 
 if __name__ == "__main__":

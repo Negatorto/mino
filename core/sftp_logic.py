@@ -19,7 +19,7 @@ try:
 except ImportError:
     paramiko = None  # type: ignore[assignment]
 
-from models import DEFAULT_NOTE_KEYWORD, DEFAULT_SSH_PORT
+from core.models import DEFAULT_NOTE_KEYWORD, DEFAULT_SSH_PORT
 
 try:
     import pwd

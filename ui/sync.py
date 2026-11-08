@@ -7,8 +7,8 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
-import sftp_logic
-from ui_helpers import clear_queue, poll_queue
+from core import sftp_logic
+from ui.helpers import clear_queue, poll_queue
 
 
 class SyncWindow(ctk.CTkFrame):

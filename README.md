@@ -61,6 +61,26 @@ MINO is a powerful and intuitive desktop application designed to facilitate the 
     *   Select a file and click **"Compare Selected File"** (or right-click) to view content differences side-by-side.
     *   In the Diff window, use the **"Edit TEST"** or **"Edit PROD"** buttons to modify files directly via the built-in editor.
 
+## Project Structure
+
+```text
+mino/
+├── mino.py           # Application entry point (python mino.py)
+├── core/             # Business logic, data models, and SFTP/LocalFS engine
+│   ├── models.py     # Typed data structures and status enums
+│   └── sftp_logic.py # Streaming comparison, transfer, and backup logic
+├── ui/               # CustomTkinter interface components
+│   ├── app.py        # Main window and results treeview
+│   ├── editor.py     # Side-by-side Diff and inline Editor
+│   ├── sync.py       # Batch and directional sync dialog
+│   ├── attributes.py # File permissions and ownership manager
+│   ├── settings.py   # Clone options, keyword and ignore dialogs
+│   └── helpers.py    # Non-blocking queue polling and themes
+├── tests/            # Test suite (python -m unittest discover -s tests)
+├── assets/           # Application icons and screenshot
+└── workspaces/       # Saved connection configurations
+```
+
 ## Requirements
 
 *   Python 3.x

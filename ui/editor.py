@@ -8,9 +8,9 @@ from typing import Any, Callable, Sequence
 
 import customtkinter as ctk
 
-from models import ComparisonRow
-import sftp_logic
-from ui_helpers import (
+from core.models import ComparisonRow
+from core import sftp_logic
+from ui.helpers import (
     clear_queue,
     create_centered_toplevel,
     get_theme_palette,

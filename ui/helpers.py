@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
-from models import THEME_PALETTES
+from core.models import THEME_PALETTES
 
 
 def resolve_theme_mode(mode: str | None = None) -> str:

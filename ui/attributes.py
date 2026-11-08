@@ -7,9 +7,9 @@ from typing import Any, Callable, Sequence
 
 import customtkinter as ctk
 
-from models import KEEP_CURRENT, ComparisonRow
-import sftp_logic
-from ui_helpers import clear_queue, poll_queue
+from core.models import KEEP_CURRENT, ComparisonRow
+from core import sftp_logic
+from ui.helpers import clear_queue, poll_queue
 
 
 class AttributesWindow(ctk.CTkFrame):
