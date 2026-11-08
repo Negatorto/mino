@@ -1,139 +1,141 @@
-import customtkinter as ctk
-from tkinter import ttk, messagebox, filedialog
-import threading
-import queue
+from __future__ import annotations
+
 import json
 import os
-import webbrowser
-import difflib
-import subprocess
 import platform
+import queue
+import subprocess
+import threading
+from tkinter import Menu, filedialog, messagebox, ttk
+from typing import Any, Sequence
+import webbrowser
+
+import customtkinter as ctk
 
 try:
     from PIL import Image, ImageTk
 except ImportError:
-    print("Warning: PIL.ImageTk not available. Icon will not be loaded.")
-    Image = None
-    ImageTk = None
+    Image = None  # type: ignore[assignment]
+    ImageTk = None  # type: ignore[assignment]
 
+from models import (
+    DEFAULT_NOTE_KEYWORD,
+    DEFAULT_SSH_PORT,
+    ComparisonRow,
+    FileStatus,
+    format_transition,
+)
 import sftp_logic
-from ui_editor import DiffWindow, EditorWindow
-from ui_sync import SyncWindow
 from ui_attributes import AttributesWindow
-from ui_settings import CloneSettingsWindow, NoteKeywordWindow, IgnorePatternsWindow
+from ui_editor import DiffWindow
+from ui_helpers import (
+    clear_queue,
+    create_centered_toplevel,
+    get_theme_palette,
+    poll_queue,
+)
+from ui_settings import CloneSettingsWindow, IgnorePatternsWindow, NoteKeywordWindow
+from ui_sync import SyncWindow
+
+BASE_DIR = os.path.dirname(os.path.realpath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+WORKSPACES_DIR = os.path.join(BASE_DIR, "workspaces")
+
 
 class App(ctk.CTk):
-    """
-    Main Application Window Class
-    """
-    def __init__(self):
+    """Main Application Window for MINO."""
+
+    SERVER_FIELDS = ("host", "port", "user", "pass", "path")
+
+    def __init__(self) -> None:
         super().__init__()
 
         self.title("MINO: Mirroring Integrity Network Operations")
         self.geometry("900x700")
 
-        # --- Icon Setup ---
-        # Absolute path to assets directory
-        assets_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets")
+        self._icon_photo: Any = None
+        self._setup_icons()
 
-        # 1. For Windows (.ico)
-        try:
-            icon_path_ico = os.path.join(assets_path, "mino.ico")
-            if os.path.exists(icon_path_ico):
-                self.iconbitmap(icon_path_ico)
-        except Exception:
-            pass  # Ignore errors on non-Windows systems or if file issues
+        self.result_queue: queue.Queue[Any] = queue.Queue()
+        self.comparison_results: dict[str, Any] | None = None
+        self._loading_workspace = False
+        self._sort_reverse: dict[str, bool] = {}
 
-        # 2. For Linux/macOS (.png)
-        if Image and ImageTk:
-            try:
-                icon_path_png = os.path.join(assets_path, "mino_icon.png")
-                if os.path.exists(icon_path_png):
-                    icon_img = Image.open(icon_path_png)
-                    self.iconphoto(False, ImageTk.PhotoImage(icon_img))
-            except Exception as e:
-                print(f"Error loading icon: {e}")
-        else:
-            print("Skipping icon load: PIL.ImageTk not available.")
-
-        # --- Data ---
-        self.result_queue = queue.Queue()
-        self.comparison_results = None
-        self.server1_vars = {}
-        self.server2_vars = {}
-
-        # Clone Options (Moved to Menu)
-        self.clone_options = {
-            "host": ctk.BooleanVar(value=True),
-            "user": ctk.BooleanVar(value=True),
-            "pass": ctk.BooleanVar(value=True),
-            "path": ctk.BooleanVar(value=True),
-            "port": ctk.BooleanVar(value=True)
+        self.clone_options: dict[str, ctk.BooleanVar] = {
+            field: ctk.BooleanVar(value=True) for field in self.SERVER_FIELDS
         }
 
-        # --- Menu Bar (Custom) ---
         self.create_custom_menubar()
 
-        # --- Main Layout ---
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)  # Results row (shifted to 3)
+        self.grid_rowconfigure(3, weight=1)
 
         input_frame = ctk.CTkFrame(self, fg_color="transparent")
-        input_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)  # Shifted to 1
+        input_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
         input_frame.grid_columnconfigure((0, 1), weight=1)
 
         self.server1_vars = self.create_server_widgets(input_frame, "TEST Server", 0)
         self.server2_vars = self.create_server_widgets(input_frame, "PRODUCTION Server", 1)
 
-        # Trace "clone" variables
-        self.server1_vars["host"].trace_add("write", lambda *args: self.on_clone_input("host"))
-        self.server1_vars["user"].trace_add("write", lambda *args: self.on_clone_input("user"))
-        self.server1_vars["pass"].trace_add("write", lambda *args: self.on_clone_input("pass"))
-        self.server1_vars["path"].trace_add("write", lambda *args: self.on_clone_input("path"))
-        self.server1_vars["port"].trace_add("write", lambda *args: self.on_clone_input("port"))
+        for field in self.SERVER_FIELDS:
+            self.server1_vars[field].trace_add("write", lambda *_args, f=field: self.on_clone_input(f))
 
         control_frame = ctk.CTkFrame(self)
-        control_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)  # Shifted to 2
+        control_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
         control_frame.grid_columnconfigure(0, weight=1)
 
-        # Button sub-frame
         button_subframe = ctk.CTkFrame(control_frame, fg_color="transparent")
         button_subframe.grid(row=0, column=0, sticky="w", padx=10, pady=5)
 
-        self.compare_button = ctk.CTkButton(button_subframe, text="Compare Folders", command=self.start_comparison)
+        self.compare_button = ctk.CTkButton(
+            button_subframe, text="Compare Folders", command=self.start_comparison
+        )
         self.compare_button.pack(side="left", padx=(0, 10))
 
-        self.diff_button = ctk.CTkButton(button_subframe, text="Compare Selected File", command=self.open_diff_window, state="disabled")
+        self.diff_button = ctk.CTkButton(
+            button_subframe,
+            text="Compare Selected File",
+            command=self.open_diff_window,
+            state="disabled",
+        )
         self.diff_button.pack(side="left", padx=(0, 10))
 
-        self.sync_button = ctk.CTkButton(button_subframe, text="Sync TEST -> PROD", command=lambda: self.open_sync_window(reverse=False), state="disabled")
+        self.sync_button = ctk.CTkButton(
+            button_subframe,
+            text="Sync TEST -> PROD",
+            command=lambda: self.open_sync_window(reverse=False),
+            state="disabled",
+        )
         self.sync_button.pack(side="left", padx=(0, 10))
 
-        self.sync_reverse_button = ctk.CTkButton(button_subframe, text="Sync PROD -> TEST", command=lambda: self.open_sync_window(reverse=True), state="disabled")
+        self.sync_reverse_button = ctk.CTkButton(
+            button_subframe,
+            text="Sync PROD -> TEST",
+            command=lambda: self.open_sync_window(reverse=True),
+            state="disabled",
+        )
         self.sync_reverse_button.pack(side="left", padx=(0, 10))
 
-        # Clone Checkbox (Moved to Menu)
-        self.clone_var = ctk.BooleanVar(value=False)
         self.scan_notes_var = ctk.BooleanVar(value=False)
-
-        self.scan_notes_switch = ctk.CTkSwitch(button_subframe, text="Scan Notes", variable=self.scan_notes_var)
+        self.scan_notes_switch = ctk.CTkSwitch(
+            button_subframe, text="Scan Notes", variable=self.scan_notes_var
+        )
         self.scan_notes_switch.pack(side="left", padx=20)
-        self.note_keyword_var = ctk.StringVar(value="MINO")
-        self.ignore_patterns_var = ctk.StringVar(value="")  # Comma-separated patterns
 
-        # Theme switcher (Moved to Menu)
+        self.note_keyword_var = ctk.StringVar(value=DEFAULT_NOTE_KEYWORD)
+        self.ignore_patterns_var = ctk.StringVar(value="")
 
         result_frame = ctk.CTkFrame(self)
-        result_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 10))  # Shifted to 3
+        result_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 10))
         result_frame.grid_rowconfigure(0, weight=1)
         result_frame.grid_columnconfigure(0, weight=1)
 
         self.create_treeview(result_frame)
 
         status_frame = ctk.CTkFrame(self, height=30)
-        status_frame.grid(row=4, column=0, sticky="ew", padx=10, pady=(5, 10))  # Shifted to 4
+        status_frame.grid(row=4, column=0, sticky="ew", padx=10, pady=(5, 10))
 
-        self.status_var = ctk.StringVar(value="Ready (Using SFTP).")
+        self.status_var = ctk.StringVar(value="Ready (Using SFTP / Local).")
         self.status_label = ctk.CTkLabel(status_frame, textvariable=self.status_var, anchor="w")
         self.status_label.pack(side="left", fill="x", padx=10, expand=True)
 
@@ -142,83 +144,126 @@ class App(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_bar.configure(mode="indeterminate")
 
-        # Note display label
         self.note_display_var = ctk.StringVar(value="")
-        # Red for Light mode, Orange for Dark mode
-        self.note_display_label = ctk.CTkLabel(status_frame, textvariable=self.note_display_var, text_color=("red", "#FFCC00"), font=("Helvetica", 12, "bold"))
+        self.note_display_label = ctk.CTkLabel(
+            status_frame,
+            textvariable=self.note_display_var,
+            text_color=("red", "#FFCC00"),
+            font=("Helvetica", 12, "bold"),
+        )
         self.note_display_label.pack(side="right", padx=10)
 
-    def create_custom_menubar(self):
-        """Creates a custom menu bar using CTkFrame and Buttons."""
+    def _setup_icons(self) -> None:
+        try:
+            icon_path_ico = os.path.join(ASSETS_DIR, "mino.ico")
+            if os.path.exists(icon_path_ico):
+                self.iconbitmap(icon_path_ico)
+        except Exception:
+            pass
+
+        if Image and ImageTk:
+            try:
+                icon_path_png = os.path.join(ASSETS_DIR, "mino_icon.png")
+                if os.path.exists(icon_path_png):
+                    icon_img = Image.open(icon_path_png)
+                    # Keep strong reference so Tk PhotoImage is not garbage collected
+                    self._icon_photo = ImageTk.PhotoImage(icon_img)
+                    self.iconphoto(False, self._icon_photo)
+            except Exception as exc:
+                print(f"Error loading icon: {exc}")
+
+    def _get_server_configs(self) -> tuple[dict[str, str], dict[str, str]]:
+        s1 = {k: v.get() for k, v in self.server1_vars.items()}
+        s2 = {k: v.get() for k, v in self.server2_vars.items()}
+        return s1, s2
+
+    def _get_row_from_item(self, item_id: str) -> ComparisonRow | None:
+        values = self.tree.item(item_id).get("values")
+        if not values:
+            return None
+        return ComparisonRow.from_tree_values(values)
+
+    def create_custom_menubar(self) -> None:
+        """Creates the top custom menu bar."""
         menubar_frame = ctk.CTkFrame(self, height=30, corner_radius=0, fg_color=("gray85", "gray17"))
         menubar_frame.grid(row=0, column=0, sticky="ew")
 
-        # File Menu
-        self.file_btn = ctk.CTkButton(menubar_frame, text="File", width=60, fg_color="transparent", text_color=("black", "white"), hover_color=("gray70", "gray25"), command=self.show_file_menu)
+        btn_kwargs = {
+            "fg_color": "transparent",
+            "text_color": ("black", "white"),
+            "hover_color": ("gray70", "gray25"),
+        }
+        self.file_btn = ctk.CTkButton(
+            menubar_frame, text="File", width=60, command=self.show_file_menu, **btn_kwargs
+        )
         self.file_btn.pack(side="left", padx=2)
 
-        # Settings Menu
-        self.settings_btn = ctk.CTkButton(menubar_frame, text="Settings", width=80, fg_color="transparent", text_color=("black", "white"), hover_color=("gray70", "gray25"), command=self.show_settings_menu)
+        self.settings_btn = ctk.CTkButton(
+            menubar_frame, text="Settings", width=80, command=self.show_settings_menu, **btn_kwargs
+        )
         self.settings_btn.pack(side="left", padx=2)
 
-        # About Menu
-        self.about_btn = ctk.CTkButton(menubar_frame, text="About", width=60, fg_color="transparent", text_color=("black", "white"), hover_color=("gray70", "gray25"), command=self.open_about_window)
+        self.about_btn = ctk.CTkButton(
+            menubar_frame, text="About", width=60, command=self.open_about_window, **btn_kwargs
+        )
         self.about_btn.pack(side="left", padx=2)
 
-    def show_file_menu(self):
-        from tkinter import Menu  # Lazy import
+    @staticmethod
+    def _popup_below_button(menu: Menu, button: ctk.CTkButton) -> None:
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        menu.tk_popup(x, y)
+
+    def show_file_menu(self) -> None:
         menu = Menu(self, tearoff=0)
         menu.add_command(label="Save Workspace (Safe)", command=self.save_workspace_safe)
-        menu.add_command(label="Save Sensitive Workspace (With Passwords)", command=self.save_workspace_sensitive)
+        menu.add_command(
+            label="Save Sensitive Workspace (With Passwords)",
+            command=self.save_workspace_sensitive,
+        )
         menu.add_command(label="Load Workspace", command=self.load_workspace)
         menu.add_separator()
         menu.add_command(label="Exit", command=self.quit)
+        self._popup_below_button(menu, self.file_btn)
 
-        # Position menu below the button
-        x = self.file_btn.winfo_rootx()
-        y = self.file_btn.winfo_rooty() + self.file_btn.winfo_height()
-        menu.tk_popup(x, y)
-
-    def show_settings_menu(self):
-        from tkinter import Menu
+    def show_settings_menu(self) -> None:
         menu = Menu(self, tearoff=0)
         menu.add_command(label="Clone Options...", command=self.open_clone_settings)
         menu.add_command(label="Set Note Keyword...", command=self.open_note_keyword_settings)
         menu.add_command(label="Set Ignore Patterns...", command=self.open_ignore_patterns_settings)
 
-        # Appearance Mode (Light/Dark)
         theme_menu = Menu(menu, tearoff=0)
         menu.add_cascade(label="Themes", menu=theme_menu)
-        theme_menu.add_command(label="Light", command=lambda: self.change_appearance_mode("Light"))
-        theme_menu.add_command(label="Dark", command=lambda: self.change_appearance_mode("Dark"))
-        theme_menu.add_command(label="System", command=lambda: self.change_appearance_mode("System"))
+        for theme_name in ("Light", "Dark", "System"):
+            theme_menu.add_command(
+                label=theme_name,
+                command=lambda mode=theme_name: self.change_appearance_mode(mode),
+            )
 
-        x = self.settings_btn.winfo_rootx()
-        y = self.settings_btn.winfo_rooty() + self.settings_btn.winfo_height()
-        menu.tk_popup(x, y)
+        self._popup_below_button(menu, self.settings_btn)
 
-    def save_workspace_safe(self):
+    def save_workspace_safe(self) -> None:
         """Saves configuration excluding passwords."""
         self._save_workspace(include_passwords=False)
 
-    def save_workspace_sensitive(self):
+    def save_workspace_sensitive(self) -> None:
         """Saves configuration including passwords."""
         self._save_workspace(include_passwords=True)
 
-    def _save_workspace(self, include_passwords=False):
+    def _save_workspace(self, include_passwords: bool = False) -> None:
+        os.makedirs(WORKSPACES_DIR, exist_ok=True)
         title = "Save Sensitive Workspace" if include_passwords else "Save Workspace"
         file_path = filedialog.asksaveasfilename(
-            initialdir="workspaces",
+            initialdir=WORKSPACES_DIR,
             title=title,
             defaultextension=".json",
-            filetypes=(("JSON Files", "*.json"), ("All Files", "*.*"))
+            filetypes=(("JSON Files", "*.json"), ("All Files", "*.*")),
+            parent=self,
         )
         if not file_path:
             return
 
-        s1_data = {k: v.get() for k, v in self.server1_vars.items()}
-        s2_data = {k: v.get() for k, v in self.server2_vars.items()}
-
+        s1_data, s2_data = self._get_server_configs()
         if not include_passwords:
             s1_data["pass"] = ""
             s2_data["pass"] = ""
@@ -229,112 +274,140 @@ class App(ctk.CTk):
             "clone_options": {k: v.get() for k, v in self.clone_options.items()},
             "scan_notes": self.scan_notes_var.get(),
             "note_keyword": self.note_keyword_var.get(),
-            "ignore_patterns": self.ignore_patterns_var.get()
+            "ignore_patterns": self.ignore_patterns_var.get(),
         }
 
         try:
-            with open(file_path, 'w') as f:
-                json.dump(data, f, indent=4)
+            with open(file_path, "w", encoding="utf-8") as f_out:
+                json.dump(data, f_out, indent=4)
             self.update_status(f"Workspace saved to {os.path.basename(file_path)}")
-        except Exception as e:
-            self.show_error("Save Error", f"Could not save workspace:\n{e}")
+        except Exception as exc:
+            self.show_error("Save Error", f"Could not save workspace:\n{exc}")
 
-    def load_workspace(self):
-        """Loads server configurations from a JSON file."""
+    def load_workspace(self) -> None:
+        """Loads server configurations and settings from a JSON file."""
+        os.makedirs(WORKSPACES_DIR, exist_ok=True)
         file_path = filedialog.askopenfilename(
-            initialdir="workspaces",
+            initialdir=WORKSPACES_DIR,
             title="Load Workspace",
-            filetypes=(("JSON Files", "*.json"), ("All Files", "*.*"))
+            filetypes=(("JSON Files", "*.json"), ("All Files", "*.*")),
+            parent=self,
         )
         if not file_path:
             return
 
         try:
-            with open(file_path, 'r') as f:
-                data = json.load(f)
+            with open(file_path, "r", encoding="utf-8") as f_in:
+                data = json.load(f_in)
 
-            s1_data = data.get("server1", {})
-            s2_data = data.get("server2", {})
+            self._loading_workspace = True
+            try:
+                if "clone_options" in data and isinstance(data["clone_options"], dict):
+                    for k, v in data["clone_options"].items():
+                        if k in self.clone_options:
+                            self.clone_options[k].set(bool(v))
+                elif "clone_enabled" in data:
+                    val = bool(data["clone_enabled"])
+                    for v in self.clone_options.values():
+                        v.set(val)
 
-            for k, v in s1_data.items():
-                if k in self.server1_vars:
-                    self.server1_vars[k].set(v)
+                for k, v in data.get("server1", {}).items():
+                    if k in self.server1_vars:
+                        self.server1_vars[k].set(str(v))
 
-            for k, v in s2_data.items():
-                if k in self.server2_vars:
-                    self.server2_vars[k].set(v)
-
-            if "clone_options" in data:
-                for k, v in data["clone_options"].items():
-                    if k in self.clone_options:
-                        self.clone_options[k].set(v)
-            elif "clone_enabled" in data:  # Backwards compatibility
-                val = data["clone_enabled"]
-                for v in self.clone_options.values():
-                    v.set(val)
+                for k, v in data.get("server2", {}).items():
+                    if k in self.server2_vars:
+                        self.server2_vars[k].set(str(v))
+            finally:
+                self._loading_workspace = False
 
             if "scan_notes" in data:
-                self.scan_notes_var.set(data["scan_notes"])
-
-            if "note_keyword" in data:
-                self.note_keyword_var.set(data["note_keyword"])
-
+                self.scan_notes_var.set(bool(data["scan_notes"]))
+            if "note_keyword" in data and str(data["note_keyword"]).strip():
+                self.note_keyword_var.set(str(data["note_keyword"]).strip())
             if "ignore_patterns" in data:
-                self.ignore_patterns_var.set(data["ignore_patterns"])
+                self.ignore_patterns_var.set(str(data["ignore_patterns"]))
 
             self.update_status(f"Workspace loaded from {os.path.basename(file_path)}")
-        except Exception as e:
-            self.show_error("Load Error", f"Could not load workspace:\n{e}")
+        except Exception as exc:
+            self.show_error("Load Error", f"Could not load workspace:\n{exc}")
 
-    def create_server_widgets(self, parent, title, col):
-        """Creates the input widgets for a server."""
+    def create_server_widgets(
+        self, parent: ctk.CTkBaseClass, title: str, col: int
+    ) -> dict[str, ctk.StringVar]:
+        """Creates the connection input panel for a target environment."""
         frame = ctk.CTkFrame(parent, border_width=1)
         frame.grid(row=0, column=col, sticky="nsew", padx=5, pady=5)
         frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(5, 10))
+        ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(5, 10)
+        )
 
         server_vars = {
             "host": ctk.StringVar(),
-            "port": ctk.StringVar(value="22"),
+            "port": ctk.StringVar(value=str(DEFAULT_SSH_PORT)),
             "user": ctk.StringVar(),
             "pass": ctk.StringVar(),
-            "path": ctk.StringVar()
+            "path": ctk.StringVar(),
         }
 
         ctk.CTkLabel(frame, text="Host:").grid(row=1, column=0, sticky="w", padx=10, pady=3)
-        ctk.CTkEntry(frame, textvariable=server_vars["host"], placeholder_text="Leave empty or 'local'", placeholder_text_color=["gray10", "gray90"]).grid(row=1, column=1, sticky="ew", padx=10, pady=3)
+        ctk.CTkEntry(
+            frame,
+            textvariable=server_vars["host"],
+            placeholder_text="Leave empty or 'local'",
+            placeholder_text_color=["gray10", "gray90"],
+        ).grid(row=1, column=1, sticky="ew", padx=10, pady=3)
 
         ctk.CTkLabel(frame, text="Port:").grid(row=2, column=0, sticky="w", padx=10, pady=3)
-        ctk.CTkEntry(frame, textvariable=server_vars["port"], width=60).grid(row=2, column=1, sticky="w", padx=10, pady=3)
+        ctk.CTkEntry(frame, textvariable=server_vars["port"], width=60).grid(
+            row=2, column=1, sticky="w", padx=10, pady=3
+        )
 
         ctk.CTkLabel(frame, text="Username:").grid(row=3, column=0, sticky="w", padx=10, pady=3)
-        ctk.CTkEntry(frame, textvariable=server_vars["user"]).grid(row=3, column=1, sticky="ew", padx=10, pady=3)
+        ctk.CTkEntry(frame, textvariable=server_vars["user"]).grid(
+            row=3, column=1, sticky="ew", padx=10, pady=3
+        )
 
         ctk.CTkLabel(frame, text="Password:").grid(row=4, column=0, sticky="w", padx=10, pady=3)
-        ctk.CTkEntry(frame, textvariable=server_vars["pass"], show="*").grid(row=4, column=1, sticky="ew", padx=10, pady=3)
+        ctk.CTkEntry(frame, textvariable=server_vars["pass"], show="*").grid(
+            row=4, column=1, sticky="ew", padx=10, pady=3
+        )
 
         ctk.CTkLabel(frame, text="Remote Path:").grid(row=5, column=0, sticky="w", padx=10, pady=(3, 10))
-        ctk.CTkEntry(frame, textvariable=server_vars["path"]).grid(row=5, column=1, sticky="ew", padx=10, pady=(3, 10))
+        ctk.CTkEntry(frame, textvariable=server_vars["path"]).grid(
+            row=5, column=1, sticky="ew", padx=10, pady=(3, 10)
+        )
 
         return server_vars
 
-    def create_treeview(self, parent):
-        """Creates and styles the results Treeview."""
+    def create_treeview(self, parent: ctk.CTkBaseClass) -> None:
+        """Creates and styles the comparison results Treeview."""
         self.style = ttk.Style(self)
-        self.tree = ttk.Treeview(parent, columns=("Status", "Path", "Note", "Owner", "Perms"), show="headings")
+        visible_cols = ("Status", "Path", "Note", "Owner", "Perms")
+        all_cols = (*visible_cols, "OctalPerms")
+        self.tree = ttk.Treeview(
+            parent,
+            columns=all_cols,
+            displaycolumns=visible_cols,
+            show="headings",
+        )
 
-        self.tree.heading("Status", text="Status")
-        self.tree.heading("Path", text="File Path")
-        self.tree.heading("Note", text="Note")
-        self.tree.heading("Owner", text="Owner:Group")
-        self.tree.heading("Perms", text="Permissions")
-
-        self.tree.column("Status", width=150, anchor='w')
-        self.tree.column("Path", width=410, anchor='w')
-        self.tree.column("Note", width=60, anchor='center')
-        self.tree.column("Owner", width=120, anchor='w')
-        self.tree.column("Perms", width=120, anchor='w')
+        headings = {
+            "Status": ("Status", 150, "w"),
+            "Path": ("File Path", 410, "w"),
+            "Note": ("Note", 60, "center"),
+            "Owner": ("Owner:Group", 120, "w"),
+            "Perms": ("Permissions", 120, "w"),
+        }
+        for col_id, (label, width, anchor) in headings.items():
+            self.tree.heading(
+                col_id,
+                text=label,
+                command=lambda c=col_id: self._sort_treeview_by_column(c),
+            )
+            self.tree.column(col_id, width=width, anchor=anchor)
 
         scrollbar = ctk.CTkScrollbar(parent, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -342,563 +415,538 @@ class App(ctk.CTk):
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
-        self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
-        self.tree.bind('<Double-1>', self.on_tree_double_click)
-        self.tree.bind('<Button-3>', self.show_tree_context_menu)
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
+        self.tree.bind("<Button-3>", self.show_tree_context_menu)
+        if platform.system() == "Darwin":
+            self.tree.bind("<Button-2>", self.show_tree_context_menu)
 
-        self.update_treeview_style(ctk.get_appearance_mode())
-        self.update_treeview_tag_colors(ctk.get_appearance_mode())
+        self.update_treeview_style()
+        self.update_treeview_tag_colors()
 
-    def show_tree_context_menu(self, event):
+    def _sort_treeview_by_column(self, col_id: str) -> None:
+        reverse = self._sort_reverse.get(col_id, False)
+        items = [(self.tree.set(item_id, col_id).lower(), item_id) for item_id in self.tree.get_children("")]
+        items.sort(key=lambda pair: pair[0], reverse=reverse)
+        for idx, (_val, item_id) in enumerate(items):
+            self.tree.move(item_id, "", idx)
+        self._sort_reverse[col_id] = not reverse
+
+    def show_tree_context_menu(self, event: Any) -> None:
         """Shows a context menu on right-click."""
         try:
-            # Get all selected items
-            selected_items = self.tree.selection()
-
-            # If right-click was on an unselected item, select it
-            item_id_under_mouse = self.tree.identify_row(event.y)
-            if item_id_under_mouse and item_id_under_mouse not in selected_items:
-                self.tree.selection_set(item_id_under_mouse)
-                selected_items = self.tree.selection()  # Update selected_items
+            selected_items = list(self.tree.selection())
+            item_under_mouse = self.tree.identify_row(event.y)
+            if item_under_mouse and item_under_mouse not in selected_items:
+                self.tree.selection_set(item_under_mouse)
+                selected_items = list(self.tree.selection())
 
             if not selected_items:
                 return
 
-            from tkinter import Menu
+            rows_by_id = {
+                item_id: row
+                for item_id in selected_items
+                if (row := self._get_row_from_item(item_id)) is not None
+            }
+            if not rows_by_id:
+                return
+
             context_menu = Menu(self.tree, tearoff=0)
 
-            # Determine if "Compare Selected File" should be enabled
-            can_diff = False
-            if len(selected_items) == 1:
-                item_data = self.tree.item(selected_items[0])
-                status = item_data['values'][0] if item_data['values'] else ""
-                if status in ["DIFFERENT", "IDENTICAL"]:
-                    can_diff = True
+            can_diff = len(rows_by_id) == 1 and next(iter(rows_by_id.values())).can_diff
+            context_menu.add_command(
+                label="Compare Selected File",
+                command=self.open_diff_window,
+                state="normal" if can_diff else "disabled",
+            )
 
-            if can_diff:
-                context_menu.add_command(label="Compare Selected File", command=self.open_diff_window)
-            else:
-                context_menu.add_command(label="Compare Selected File", state="disabled")
+            syncable_to_prod = [iid for iid, row in rows_by_id.items() if row.can_sync_to_prod]
+            syncable_to_test = [iid for iid, row in rows_by_id.items() if row.can_sync_to_test]
 
-            # "Sync File" option (TEST -> PROD)
-            syncable_items_test_prod = []
-            syncable_items_prod_test = []
-            for item_id in selected_items:
-                item_data = self.tree.item(item_id)
-                status = item_data['values'][0] if item_data['values'] else ""
-                if status in ["DIFFERENT", "ONLY ON TEST"]:
-                    syncable_items_test_prod.append(item_id)
-                if status in ["DIFFERENT", "ONLY ON PROD"]:
-                    syncable_items_prod_test.append(item_id)
+            self._add_context_sync_item(context_menu, syncable_to_prod, "TEST -> PROD", reverse=False)
+            self._add_context_sync_item(context_menu, syncable_to_test, "PROD -> TEST", reverse=True)
 
-            if len(syncable_items_test_prod) == 1:
-                context_menu.add_command(label="Sync File (TEST -> PROD)", command=lambda: self.sync_single_file(syncable_items_test_prod[0]))
-            elif len(syncable_items_test_prod) > 1:
-                context_menu.add_command(label=f"Sync {len(syncable_items_test_prod)} Files (TEST -> PROD)", command=lambda: self.sync_selected_files(syncable_items_test_prod))
-            else:
-                context_menu.add_command(label="Sync File (TEST -> PROD)", state="disabled")
-
-            if len(syncable_items_prod_test) == 1:
-                context_menu.add_command(label="Sync File (PROD -> TEST)", command=lambda: self.sync_single_file(syncable_items_prod_test[0], reverse=True))
-            elif len(syncable_items_prod_test) > 1:
-                context_menu.add_command(label=f"Sync {len(syncable_items_prod_test)} Files (PROD -> TEST)", command=lambda: self.sync_selected_files(syncable_items_prod_test, reverse=True))
-            else:
-                context_menu.add_command(label="Sync File (PROD -> TEST)", state="disabled")
-
-            # "Change Attributes..." is always available for selected items
-            context_menu.add_command(label="Change Attributes...", command=lambda: self.open_attributes_window(selected_items))
+            items_snapshot = tuple(rows_by_id.keys())
+            context_menu.add_command(
+                label="Change Attributes...",
+                command=lambda ids=items_snapshot: self.open_attributes_window(ids),
+            )
             context_menu.tk_popup(event.x_root, event.y_root)
+        except Exception as exc:
+            print(f"Error showing context menu: {exc}")
 
-        except Exception as e:
-            print(f"Error showing context menu: {e}")
+    def _add_context_sync_item(
+        self,
+        menu: Menu,
+        item_ids: list[str],
+        direction_label: str,
+        *,
+        reverse: bool,
+    ) -> None:
+        if len(item_ids) == 1:
+            first_id = item_ids[0]
+            menu.add_command(
+                label=f"Sync File ({direction_label})",
+                command=lambda iid=first_id, rev=reverse: self.sync_single_file(iid, reverse=rev),
+            )
+        elif len(item_ids) > 1:
+            ids_tuple = tuple(item_ids)
+            menu.add_command(
+                label=f"Sync {len(item_ids)} Files ({direction_label})",
+                command=lambda ids=ids_tuple, rev=reverse: self.sync_selected_files(ids, reverse=rev),
+            )
+        else:
+            menu.add_command(label=f"Sync File ({direction_label})", state="disabled")
 
-    def sync_single_file(self, item_id, reverse=False):
-        """Starts the single file sync process."""
-        item_data = self.tree.item(item_id)
-        values = item_data['values']
-        relative_path = values[1]
+    def sync_single_file(self, item_id: str, reverse: bool = False) -> None:
+        """Synchronizes a single selected file."""
+        self._start_selected_sync([item_id], reverse=reverse)
 
-        direction = "PROD to TEST" if reverse else "TEST to PROD"
-        if not messagebox.askyesno("Confirm Sync", f"Are you sure you want to overwrite/copy '{relative_path}' ({direction})?", parent=self):
+    def sync_selected_files(self, item_ids: Sequence[str], reverse: bool = False) -> None:
+        """Synchronizes multiple selected files in one session."""
+        self._start_selected_sync(item_ids, reverse=reverse)
+
+    def _start_selected_sync(self, item_ids: Sequence[str], *, reverse: bool = False) -> None:
+        files_to_sync = [
+            row.relative_path
+            for item_id in item_ids
+            if (row := self._get_row_from_item(item_id)) is not None
+        ]
+        if not files_to_sync:
             return
 
-        self.update_status(f"Syncing {relative_path}...")
-        self.progress_bar.start()
+        source_name = "PROD" if reverse else "TEST"
+        dest_name = "TEST" if reverse else "PROD"
+        direction = f"{source_name} to {dest_name}"
+        is_single = len(files_to_sync) == 1
 
-        s1_config = {k: v.get() for k, v in self.server1_vars.items()}
-        s2_config = {k: v.get() for k, v in self.server2_vars.items()}
-
-        if reverse:
-            threading.Thread(target=sftp_logic.sync_single_file_task, args=(s2_config, s1_config, relative_path, self.result_queue), daemon=True).start()
-        else:
-            threading.Thread(target=sftp_logic.sync_single_file_task, args=(s1_config, s2_config, relative_path, self.result_queue), daemon=True).start()
-        self.after(100, self.check_single_sync_queue)
-
-    def sync_selected_files(self, item_ids, reverse=False):
-        """Starts the batch sync process for selected files."""
-        files_to_sync = []
-        for item_id in item_ids:
-            values = self.tree.item(item_id)['values']
-            files_to_sync.append(values[1])  # relative_path
-
-        direction = "PROD to TEST" if reverse else "TEST to PROD"
-        if not messagebox.askyesno("Confirm Batch Sync", f"Are you sure you want to sync {len(files_to_sync)} files ({direction})?", parent=self):
+        prompt_title = "Confirm Sync" if is_single else "Confirm Batch Sync"
+        prompt_msg = (
+            f"Are you sure you want to overwrite/copy '{files_to_sync[0]}' ({direction})?"
+            if is_single
+            else f"Are you sure you want to sync {len(files_to_sync)} files ({direction})?"
+        )
+        if not messagebox.askyesno(prompt_title, prompt_msg, parent=self):
             return
 
-        self.update_status(f"Starting batch sync for {len(files_to_sync)} files ({direction})...")
+        status_msg = (
+            f"Syncing {files_to_sync[0]} ({direction})..."
+            if is_single
+            else f"Starting batch sync for {len(files_to_sync)} files ({direction})..."
+        )
+        self.update_status(status_msg)
         self.progress_bar.start()
+        clear_queue(self.result_queue)
 
-        s1_config = {k: v.get() for k, v in self.server1_vars.items()}
-        s2_config = {k: v.get() for k, v in self.server2_vars.items()}
+        s1_config, s2_config = self._get_server_configs()
+        src_cfg, dst_cfg = (s2_config, s1_config) if reverse else (s1_config, s2_config)
 
-        if reverse:
-            threading.Thread(target=sftp_logic.sync_multiple_files_task, args=(s2_config, s1_config, files_to_sync, self.result_queue), daemon=True).start()
+        if is_single:
+            threading.Thread(
+                target=sftp_logic.sync_single_file_task,
+                args=(src_cfg, dst_cfg, files_to_sync[0], self.result_queue, source_name, dest_name),
+                daemon=True,
+            ).start()
         else:
-            threading.Thread(target=sftp_logic.sync_multiple_files_task, args=(s1_config, s2_config, files_to_sync, self.result_queue), daemon=True).start()
-        self.after(100, self.check_batch_sync_queue)
+            threading.Thread(
+                target=sftp_logic.sync_multiple_files_task,
+                args=(src_cfg, dst_cfg, files_to_sync, self.result_queue, source_name, dest_name),
+                daemon=True,
+            ).start()
 
-    def check_single_sync_queue(self):
-        """Checks the queue for single file sync results."""
-        try:
-            result = self.result_queue.get_nowait()
+        poll_queue(
+            self,
+            self.result_queue,
+            lambda item: self._handle_selected_sync_item(item, is_single=is_single),
+            on_ui_error=self._handle_queue_ui_error,
+        )
 
-            if isinstance(result, Exception):
-                self.show_error("Sync Error", f"An error occurred:\n{result}")
-                self.stop_loading()
-            elif isinstance(result, str):
-                self.update_status(result)
-                self.after(100, self.check_single_sync_queue)
-            elif isinstance(result, dict) and result.get('status') == 'single_sync_complete':
+    def _handle_queue_ui_error(self, exc: Exception) -> None:
+        self.show_error("GUI Error", f"Error updating UI: {exc}")
+        self.stop_loading()
+
+    def _handle_selected_sync_item(self, result: Any, *, is_single: bool) -> bool:
+        if isinstance(result, Exception):
+            self.show_error("Sync Error", f"An error occurred:\n{result}")
+            self.stop_loading()
+            return False
+
+        if isinstance(result, str):
+            self.update_status(result)
+            return True
+
+        if isinstance(result, dict):
+            status = result.get("status")
+            if status == "single_sync_complete":
                 self.update_status(f"Synced {result.get('file')} successfully.")
-                self.stop_loading()
-                if messagebox.askyesno("Sync Complete", "File synced. Refresh comparison?", parent=self):
-                    self.start_comparison()
-        except queue.Empty:
-            self.after(100, self.check_single_sync_queue)
-        except Exception as e:
-            self.show_error("GUI Error", f"Error updating UI: {e}")
-            self.stop_loading()
-
-    def check_batch_sync_queue(self):
-        """Checks the queue for batch sync results."""
-        try:
-            result = self.result_queue.get_nowait()
-
-            if isinstance(result, Exception):
-                self.show_error("Sync Error", f"An error occurred:\n{result}")
-                self.stop_loading()
-            elif isinstance(result, str):
-                self.update_status(result)
-                self.after(100, self.check_batch_sync_queue)
-            elif isinstance(result, dict):
-                if result.get('status') == 'single_sync_complete':
-                    self.update_status(f"Synced {result.get('file')} successfully.")
-                    self.after(100, self.check_batch_sync_queue)
-                elif result.get('status') == 'batch_sync_complete':
+                if is_single:
                     self.stop_loading()
-                    if messagebox.askyesno("Batch Sync Complete", "All selected files synced. Refresh comparison?", parent=self):
+                    if messagebox.askyesno("Sync Complete", "File synced. Refresh comparison?", parent=self):
                         self.start_comparison()
-        except queue.Empty:
-            self.after(100, self.check_batch_sync_queue)
-        except Exception as e:
-            self.show_error("GUI Error", f"Error updating UI: {e}")
-            self.stop_loading()
+                    return False
+                return True
 
-    def update_treeview_style(self, mode):
-        """Updates the ttk.Treeview style to match the CTk theme."""
-        if mode == "Dark":
-            bg, fg, heading_bg = "#2B2B2B", "#E0E0E0", "#343638"
-        else:  # "Light"
-            bg, fg, heading_bg = "#FFFFFF", "#101010", "#EAEAEA"
+            if status == "batch_sync_complete":
+                self.stop_loading()
+                if messagebox.askyesno(
+                    "Batch Sync Complete",
+                    "All selected files synced. Refresh comparison?",
+                    parent=self,
+                ):
+                    self.start_comparison()
+                return False
 
+        return True
+
+    def update_treeview_style(self, mode: str | None = None) -> None:
+        """Updates the ttk.Treeview style to match the active CustomTkinter theme."""
+        tv = get_theme_palette(mode)["treeview"]
         self.style.theme_use("clam")
-        self.style.configure("Treeview", background=bg, fieldbackground=bg, foreground=fg)
-        self.style.configure("Treeview.Heading", background=heading_bg, foreground=fg, font=('Helvetica', 10, 'bold'))
-        self.style.map('Treeview.Heading', background=[('active', heading_bg)])
+        self.style.configure(
+            "Treeview",
+            background=tv["bg"],
+            fieldbackground=tv["bg"],
+            foreground=tv["fg"],
+        )
+        self.style.map(
+            "Treeview",
+            background=[("selected", tv["selected_bg"])],
+            foreground=[("selected", "#FFFFFF")],
+        )
+        self.style.configure(
+            "Treeview.Heading",
+            background=tv["heading_bg"],
+            foreground=tv["fg"],
+            font=("Helvetica", 10, "bold"),
+        )
+        self.style.map("Treeview.Heading", background=[("active", tv["heading_bg"])])
 
-    def update_treeview_tag_colors(self, mode):
-        """Updates the Treeview tag colors for light/dark mode."""
-        if mode == "Dark":
-            self.tree.tag_configure('different', background='#5D0000', foreground="#FFD0D0")
-            self.tree.tag_configure('solo_test', background='#003D5D', foreground="#C0E8FF")
-            self.tree.tag_configure('solo_prod', background='#004D00', foreground="#D0FFD0")
-            self.tree.tag_configure('identical', foreground='#707070')
-        else:
-            self.tree.tag_configure('different', background='#FFC0C0', foreground="#8B0000")
-            self.tree.tag_configure('solo_test', background='#C0E8FF', foreground="#003A59")
-            self.tree.tag_configure('solo_prod', background='#C0FFC0', foreground="#004D00")
-            self.tree.tag_configure('identical', foreground='#888888')
+    def update_treeview_tag_colors(self, mode: str | None = None) -> None:
+        """Updates the Treeview row tag colors for Light/Dark mode."""
+        tags = get_theme_palette(mode)["tags"]
+        self.tree.tag_configure("different", background=tags["different_bg"], foreground=tags["different_fg"])
+        self.tree.tag_configure("solo_test", background=tags["solo_test_bg"], foreground=tags["solo_test_fg"])
+        self.tree.tag_configure("solo_prod", background=tags["solo_prod_bg"], foreground=tags["solo_prod_fg"])
+        self.tree.tag_configure("identical", foreground=tags["identical_fg"])
 
-    def change_appearance_mode(self, new_mode_str):
-        """Callback for the theme switcher."""
+    def change_appearance_mode(self, new_mode_str: str) -> None:
+        """Switches the application appearance mode ('Light', 'Dark', 'System')."""
         ctk.set_appearance_mode(new_mode_str)
-        self.update_treeview_style(new_mode_str)
-        self.update_treeview_tag_colors(new_mode_str)
+        # Resolve after set_appearance_mode so 'System' maps to the actual OS theme
+        self.update_treeview_style(None)
+        self.update_treeview_tag_colors(None)
 
-    def on_clone_input(self, field_key):
-        """Clones input from TEST to PROD if the specific option is active."""
-        if self.clone_options.get(field_key) and self.clone_options[field_key].get():
+    def on_clone_input(self, field_key: str) -> None:
+        """Clones input from TEST to PROD if enabled and not mid-workspace-load."""
+        if self._loading_workspace:
+            return
+        opt = self.clone_options.get(field_key)
+        if opt is not None and opt.get():
             self.server2_vars[field_key].set(self.server1_vars[field_key].get())
 
-    def on_tree_select(self, event):
-        """Enables Diff button only if a 'DIFFERENT' item is selected."""
+    def on_tree_select(self, _event: Any = None) -> None:
+        """Updates Diff button state and note display banner on row selection."""
         selected_items = self.tree.selection()
         if not selected_items:
             self.diff_button.configure(state="disabled")
-            self.note_display_var.set("")  # Clear note display
-            return
-
-        item = self.tree.item(selected_items[0])
-        status = item['values'][0] if item['values'] else ""
-
-        # Check for note content
-        note_content = ""
-        relative_path = item['values'][1]
-
-        if self.comparison_results:
-            # Check metadata from both sources
-            # Check files_s1
-            s1_meta = self.comparison_results.get('files_s1', {}).get(relative_path)
-            if s1_meta and s1_meta.get('has_note') and isinstance(s1_meta['has_note'], str):
-                note_content = s1_meta['has_note']
-
-            # If not found in s1, check s2
-            if not note_content:
-                s2_meta = self.comparison_results.get('files_s2', {}).get(relative_path)
-                if s2_meta and s2_meta.get('has_note') and isinstance(s2_meta['has_note'], str):
-                    note_content = s2_meta['has_note']
-
-        if note_content:
-            self.note_display_var.set(f"{note_content}")
-        else:
             self.note_display_var.set("")
+            return
 
-        if status in ["DIFFERENT", "IDENTICAL"]:
-            self.diff_button.configure(state="normal")
-        else:
+        row = self._get_row_from_item(selected_items[0])
+        if row is None:
             self.diff_button.configure(state="disabled")
+            self.note_display_var.set("")
+            return
 
-    def on_tree_double_click(self, event):
-        """Opens Diff Window on double-click if valid."""
+        note_content = ""
+        if self.comparison_results:
+            for source_key in ("files_s1", "files_s2"):
+                meta = self.comparison_results.get(source_key, {}).get(row.relative_path)
+                if meta and meta.get("has_note"):
+                    raw_note = meta["has_note"]
+                    note_content = raw_note if isinstance(raw_note, str) else self.note_keyword_var.get()
+                    break
+
+        self.note_display_var.set(note_content)
+        self.diff_button.configure(state="normal" if row.can_diff else "disabled")
+
+    def on_tree_double_click(self, _event: Any = None) -> None:
+        """Opens DiffWindow on double-clicking a comparable file."""
         selected_items = self.tree.selection()
         if not selected_items:
             return
-
-        item = self.tree.item(selected_items[0])
-        status = item['values'][0] if item['values'] else ""
-
-        if status in ["DIFFERENT", "IDENTICAL"]:
+        row = self._get_row_from_item(selected_items[0])
+        if row is not None and row.can_diff:
             self.open_diff_window()
 
-    def open_diff_window(self):
-        """Opens the DiffWindow for the selected file."""
-        try:
-            selected_item = self.tree.selection()[0]
-            item_values = self.tree.item(selected_item)['values']
-        except IndexError:
+    def open_diff_window(self) -> None:
+        """Opens the side-by-side DiffWindow for the currently selected file."""
+        selected = self.tree.selection()
+        if not selected or (row := self._get_row_from_item(selected[0])) is None:
             self.show_error("Error", "No valid file selected.")
             return
 
-        s1_config = {k: v.get() for k, v in self.server1_vars.items()}
-        s2_config = {k: v.get() for k, v in self.server2_vars.items()}
+        s1_config, s2_config = self._get_server_configs()
+        diff_top = create_centered_toplevel(
+            self,
+            f"Diff: {row.relative_path}",
+            1100,
+            700,
+            modal_transient=False,
+        )
+        DiffWindow(diff_top, s1_config, s2_config, row)
 
-        diff_top_level = ctk.CTkToplevel(self)
-        diff_top_level.title(f"Diff: {item_values[1]}")
-        diff_top_level.geometry("1100x700")
-        DiffWindow(diff_top_level, s1_config, s2_config, item_values)
-
-    def open_attributes_window(self, selected_item_ids):
-        """Opens the AttributesWindow for the selected file(s)."""
-        if not selected_item_ids:
+    def open_attributes_window(self, selected_item_ids: Sequence[str]) -> None:
+        """Opens AttributesWindow for the selected Treeview row(s)."""
+        rows = [
+            row
+            for item_id in selected_item_ids
+            if (row := self._get_row_from_item(item_id)) is not None
+        ]
+        if not rows:
             self.show_error("Error", "No file(s) selected.")
             return
 
-        # Extract item_values for all selected items
-        selected_items_data = [self.tree.item(item_id)['values'] for item_id in selected_item_ids]
+        s1_config, s2_config = self._get_server_configs()
+        attr_top = create_centered_toplevel(self, "Change Attributes", 500, 400)
+        AttributesWindow(attr_top, s1_config, s2_config, rows, self.update_status, self.start_comparison)
 
-        s1_config = {k: v.get() for k, v in self.server1_vars.items()}
-        s2_config = {k: v.get() for k, v in self.server2_vars.items()}
-
-        attr_top_level = ctk.CTkToplevel(self)
-        attr_top_level.title("Change Attributes")
-        attr_top_level.geometry("500x400")
-        attr_top_level.transient(self)
-        AttributesWindow(attr_top_level, s1_config, s2_config, selected_items_data, self.update_status, self.start_comparison)
-        
-    def open_sync_window(self, reverse=False):
-        """Opens the SyncWindow for the current comparison."""
+    def open_sync_window(self, reverse: bool = False) -> None:
+        """Opens SyncWindow for TEST -> PROD or PROD -> TEST."""
         if not self.comparison_results:
             self.show_error("Sync Error", "Please run a comparison first.")
             return
 
-        s1_config = {k: v.get() for k, v in self.server1_vars.items()}
-        s2_config = {k: v.get() for k, v in self.server2_vars.items()}
-
+        s1_config, s2_config = self._get_server_configs()
         source_name = "PRODUCTION" if reverse else "TEST"
         dest_name = "TEST" if reverse else "PRODUCTION"
 
-        sync_top_level = ctk.CTkToplevel(self)
-        sync_top_level.title(f"Synchronize {source_name} to {dest_name}")
-        sync_top_level.geometry("600x550")
-        sync_top_level.transient(self)
-        
-        # Center
-        sync_top_level.update_idletasks()
-        width = sync_top_level.winfo_width()
-        height = sync_top_level.winfo_height()
-        x = (sync_top_level.winfo_screenwidth() // 2) - (width // 2)
-        y = (sync_top_level.winfo_screenheight() // 2) - (height // 2)
-        sync_top_level.geometry('{}x{}+{}+{}'.format(width, height, x, y))
+        sync_top = create_centered_toplevel(
+            self, f"Synchronize {source_name} to {dest_name}", 600, 560
+        )
+        SyncWindow(
+            sync_top,
+            s1_config,
+            s2_config,
+            self.comparison_results,
+            self.start_comparison,
+            reverse=reverse,
+        )
 
-        SyncWindow(sync_top_level, s1_config, s2_config, self.comparison_results, self.start_comparison, reverse=reverse)
+    def open_clone_settings(self) -> None:
+        """Opens the Clone Settings dialog."""
+        clone_top = create_centered_toplevel(self, "Clone Options", 320, 290, resizable=False)
+        CloneSettingsWindow(clone_top, self.clone_options, self.on_clone_input)
 
-    def open_clone_settings(self):
-        """Opens the Clone Settings popup window."""
-        clone_top_level = ctk.CTkToplevel(self)
-        clone_top_level.title("Clone Options")
-        clone_top_level.geometry("320x290")
-        clone_top_level.transient(self)
-        CloneSettingsWindow(clone_top_level, self.clone_options, self.on_clone_input)
+    def open_note_keyword_settings(self) -> None:
+        """Opens the Note Keyword configuration dialog."""
+        keyword_top = create_centered_toplevel(self, "Set Note Keyword", 320, 160, resizable=False)
+        NoteKeywordWindow(
+            keyword_top,
+            self.note_keyword_var,
+            lambda k: self.update_status(f"Note keyword set to: {k}"),
+        )
 
-    def open_note_keyword_settings(self):
-        """Opens a custom dialog to set the note keyword."""
-        keyword_top_level = ctk.CTkToplevel(self)
-        keyword_top_level.title("Set Note Keyword")
-        keyword_top_level.geometry("300x150")
-        keyword_top_level.transient(self)
-        
-        # Center the window
-        keyword_top_level.update_idletasks()
-        width = keyword_top_level.winfo_width()
-        height = keyword_top_level.winfo_height()
-        x = (keyword_top_level.winfo_screenwidth() // 2) - (width // 2)
-        y = (keyword_top_level.winfo_screenheight() // 2) - (height // 2)
-        keyword_top_level.geometry('{}x{}+{}+{}'.format(width, height, x, y))
+    def open_ignore_patterns_settings(self) -> None:
+        """Opens the Ignore Patterns configuration dialog."""
+        ignore_top = create_centered_toplevel(self, "Set Ignore Patterns", 400, 330)
+        IgnorePatternsWindow(ignore_top, self.ignore_patterns_var)
 
-        NoteKeywordWindow(keyword_top_level, self.note_keyword_var, lambda k: print(f"Note keyword set to: {k}"))
-
-    def open_ignore_patterns_settings(self):
-        """Opens a custom dialog to set the ignore patterns."""
-        ignore_top_level = ctk.CTkToplevel(self)
-        ignore_top_level.title("Set Ignore Patterns")
-        ignore_top_level.geometry("400x330")
-        ignore_top_level.transient(self)
-        
-        # Center the window
-        ignore_top_level.update_idletasks()
-        width = ignore_top_level.winfo_width()
-        height = ignore_top_level.winfo_height()
-        x = (ignore_top_level.winfo_screenwidth() // 2) - (width // 2)
-        y = (ignore_top_level.winfo_screenheight() // 2) - (height // 2)
-        ignore_top_level.geometry('{}x{}+{}+{}'.format(width, height, x, y))
-
-        IgnorePatternsWindow(ignore_top_level, self.ignore_patterns_var)
-
-    def update_status(self, message):
-        """Thread-safe method to update the status label."""
+    def update_status(self, message: str) -> None:
+        """Updates the status bar message."""
         self.status_var.set(message)
 
-    def start_comparison(self):
-        """Starts the folder comparison in a background thread."""
+    def start_comparison(self) -> None:
+        """Starts the background folder comparison."""
         self.compare_button.configure(state="disabled")
         self.diff_button.configure(state="disabled")
         self.sync_button.configure(state="disabled")
-        self.sync_reverse_button.configure(state="disabled") # Added this line
+        self.sync_reverse_button.configure(state="disabled")
+        self.note_display_var.set("")
         self.progress_bar.start()
         self.update_status("Starting comparison...")
-        
+
         self.comparison_results = None
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+        self.tree.delete(*self.tree.get_children())
+        clear_queue(self.result_queue)
 
-        s1 = {k: v.get() for k, v in self.server1_vars.items()}
-        s2 = {k: v.get() for k, v in self.server2_vars.items()}
+        s1, s2 = self._get_server_configs()
+        scan_arg: str | bool = self.note_keyword_var.get() if self.scan_notes_var.get() else False
 
-        threading.Thread(target=sftp_logic.compare_folders_task, args=(s1, s2, self.result_queue, self.note_keyword_var.get() if self.scan_notes_var.get() else False, self.ignore_patterns_var.get()), daemon=True).start()
-        self.after(100, self.check_queue)
+        threading.Thread(
+            target=sftp_logic.compare_folders_task,
+            args=(s1, s2, self.result_queue, scan_arg, self.ignore_patterns_var.get()),
+            daemon=True,
+        ).start()
 
-    def check_queue(self):
-        """Checks the result queue for updates from the thread."""
-        try:
-            result = self.result_queue.get_nowait()
-            
-            if isinstance(result, Exception):
-                self.show_error("Error", f"An error occurred:\n{result}")
-                self.stop_loading()
-            elif isinstance(result, str):
-                 self.update_status(result)
-                 self.after(100, self.check_queue)
-            elif isinstance(result, dict):
-                self.populate_results(result)
-                self.stop_loading()
-                self.update_status("Comparison complete.")
-        except queue.Empty:
-            self.after(100, self.check_queue)
-        except Exception as e:
-            self.show_error("GUI Error", f"Error updating UI: {e}")
+        poll_queue(
+            self,
+            self.result_queue,
+            self._handle_comparison_queue_item,
+            on_ui_error=self._handle_queue_ui_error,
+        )
+
+    def _handle_comparison_queue_item(self, result: Any) -> bool:
+        if isinstance(result, Exception):
+            self.show_error("Error", f"An error occurred:\n{result}")
             self.stop_loading()
+            self.update_status("Comparison failed.")
+            return False
 
-    def stop_loading(self):
-        """Stops progress bar and re-enables button."""
+        if isinstance(result, str):
+            self.update_status(result)
+            return True
+
+        if isinstance(result, dict):
+            self.populate_results(result)
+            self.stop_loading()
+            return False
+
+        return True
+
+    def stop_loading(self) -> None:
+        """Stops the progress bar and re-enables the Compare button."""
         self.progress_bar.stop()
         self.progress_bar.set(0)
         self.compare_button.configure(state="normal")
 
-    def populate_results(self, results):
-        """Fills the Treeview with comparison results."""
+    def _build_note_indicator(self, *metas: dict[str, Any]) -> str:
+        if not self.scan_notes_var.get():
+            return ""
+        return "⚠" if any(m.get("has_note", False) for m in metas if m) else "✓"
+
+    def _insert_single_side_rows(
+        self,
+        paths: Sequence[str],
+        meta_map: dict[str, dict[str, Any]],
+        status: FileStatus,
+        tag: str,
+    ) -> None:
+        for rel_path in sorted(paths):
+            meta = meta_map.get(rel_path, {})
+            owner_group = f"{meta.get('owner', '?')}:{meta.get('group', '?')}"
+            row = ComparisonRow(
+                status=status.value,
+                relative_path=rel_path,
+                note=self._build_note_indicator(meta),
+                owner_group=owner_group,
+                symbolic_perms=meta.get("mode", "?"),
+                octal_perms=meta.get("octal_mode", "?"),
+            )
+            self.tree.insert("", "end", values=row.to_tree_values(), tags=(tag,))
+
+    def _insert_dual_side_rows(
+        self,
+        paths: Sequence[str],
+        meta_s1: dict[str, dict[str, Any]],
+        meta_s2: dict[str, dict[str, Any]],
+        status: FileStatus,
+        tag: str,
+    ) -> None:
+        for rel_path in sorted(paths):
+            m1 = meta_s1.get(rel_path, {})
+            m2 = meta_s2.get(rel_path, {})
+            owner1 = f"{m1.get('owner', '?')}:{m1.get('group', '?')}"
+            owner2 = f"{m2.get('owner', '?')}:{m2.get('group', '?')}"
+
+            row = ComparisonRow(
+                status=status.value,
+                relative_path=rel_path,
+                note=self._build_note_indicator(m1, m2),
+                owner_group=format_transition(owner1, owner2),
+                symbolic_perms=format_transition(m1.get("mode", "?"), m2.get("mode", "?")),
+                octal_perms=format_transition(m1.get("octal_mode", "?"), m2.get("octal_mode", "?")),
+            )
+            self.tree.insert("", "end", values=row.to_tree_values(), tags=(tag,))
+
+    def populate_results(self, results: dict[str, Any]) -> None:
+        """Populates the Treeview with comparison results and updates action buttons."""
         self.update_status("Populating results...")
         self.comparison_results = results
-        
-        files_s1_meta = results.get('files_s1', {})
-        files_s2_meta = results.get('files_s2', {})
-        
-        for f in sorted(results['different']):
-            meta1, meta2 = files_s1_meta.get(f, {}), files_s2_meta.get(f, {})
-            owner1_str = f"{meta1.get('owner', '?')}:{meta1.get('group', '?')}"
-            perms1_sym = meta1.get('mode', '?')
-            perms1_oct = meta1.get('octal_mode', '?')
-            owner2_str = f"{meta2.get('owner', '?')}:{meta2.get('group', '?')}"
-            perms2_sym = meta2.get('mode', '?')
-            perms2_oct = meta2.get('octal_mode', '?')
 
-            owner_str = owner1_str if owner1_str == owner2_str else f"{owner1_str} -> {owner2_str}"
-            perms_sym_str = perms1_sym if perms1_sym == perms2_sym else f"{perms1_sym} -> {perms2_sym}"
-            perms_oct_str = perms1_oct if perms1_oct == perms2_oct else f"{perms1_oct} -> {perms2_oct}"
-            
-            owner_str = owner1_str if owner1_str == owner2_str else f"{owner1_str} -> {owner2_str}"
-            perms_sym_str = perms1_sym if perms1_sym == perms2_sym else f"{perms1_sym} -> {perms2_sym}"
-            perms_oct_str = perms1_oct if perms1_oct == perms2_oct else f"{perms1_oct} -> {perms2_oct}"
-            
-            note_str = ""
-            if self.scan_notes_var.get():
-                has_note1 = meta1.get('has_note', False)
-                has_note2 = meta2.get('has_note', False)
-                if has_note1 or has_note2:
-                    note_str = "⚠" # Orange warning
-                else:
-                    note_str = "✓"
+        files_s1_meta = results.get("files_s1", {})
+        files_s2_meta = results.get("files_s2", {})
 
-            self.tree.insert("", "end", values=("DIFFERENT", f, note_str, owner_str, perms_sym_str, perms_oct_str), tags=('different',))
-        
-        for f in sorted(results['only_on_1']):
-            meta = files_s1_meta.get(f, {})
-            owner = f"{meta.get('owner', '?')}:{meta.get('group', '?')}"
-            perms_sym = meta.get('mode', '?')
-            perms_oct = meta.get('octal_mode', '?')
-            perms_oct = meta.get('octal_mode', '?')
-
-            note_str = ""
-            if self.scan_notes_var.get():
-                 if meta.get('has_note', False):
-                     note_str = "⚠"
-                 else:
-                     note_str = "✓"
-
-            self.tree.insert("", "end", values=("ONLY ON TEST", f, note_str, owner, perms_sym, perms_oct), tags=('solo_test',))
-
-        for f in sorted(results['only_on_2']):
-            meta = files_s2_meta.get(f, {})
-            owner = f"{meta.get('owner', '?')}:{meta.get('group', '?')}"
-            perms_sym = meta.get('mode', '?')
-            perms_oct = meta.get('octal_mode', '?')
-            perms_oct = meta.get('octal_mode', '?')
-
-            note_str = ""
-            if self.scan_notes_var.get():
-                if meta.get('has_note', False):
-                    note_str = "⚠"
-                else:
-                    note_str = "✓"
-
-            self.tree.insert("", "end", values=("ONLY ON PROD", f, note_str, owner, perms_sym, perms_oct), tags=('solo_prod',))
-        
-        for f in sorted(results['identical']):
-            meta1 = files_s1_meta.get(f, {})
-            owner1_str = f"{meta1.get('owner', '?')}:{meta1.get('group', '?')}"
-            perms1_sym = meta1.get('mode', '?')
-            perms1_oct = meta1.get('octal_mode', '?')
-            
-            meta2 = files_s2_meta.get(f, {})
-            owner2_str = f"{meta2.get('owner', '?')}:{meta2.get('group', '?')}"
-            perms2_sym = meta2.get('mode', '?')
-            perms2_oct = meta2.get('octal_mode', '?')
-            
-            owner_str = owner1_str if owner1_str == owner2_str else f"{owner1_str} -> {owner2_str}"
-            perms_sym_str = perms1_sym if perms1_sym == perms2_sym else f"{perms1_sym} -> {perms2_sym}"
-            perms_oct_str = perms1_oct if perms1_oct == perms2_oct else f"{perms1_oct} -> {perms2_oct}"
-            
-            owner_str = owner1_str if owner1_str == owner2_str else f"{owner1_str} -> {owner2_str}"
-            perms_sym_str = perms1_sym if perms1_sym == perms2_sym else f"{perms1_sym} -> {perms2_sym}"
-            perms_oct_str = perms1_oct if perms1_oct == perms2_oct else f"{perms1_oct} -> {perms2_oct}"
-            
-            note_str = ""
-            if self.scan_notes_var.get():
-                has_note1 = meta1.get('has_note', False)
-                has_note2 = meta2.get('has_note', False)
-                if has_note1 or has_note2:
-                    note_str = "⚠"
-                else:
-                    note_str = "✓"
-
-            self.tree.insert("", "end", values=("IDENTICAL", f, note_str, owner_str, perms_sym_str, perms_oct_str), tags=('identical',))
+        self._insert_dual_side_rows(
+            results.get("different", []), files_s1_meta, files_s2_meta, FileStatus.DIFFERENT, "different"
+        )
+        self._insert_single_side_rows(
+            results.get("only_on_1", []), files_s1_meta, FileStatus.ONLY_ON_TEST, "solo_test"
+        )
+        self._insert_single_side_rows(
+            results.get("only_on_2", []), files_s2_meta, FileStatus.ONLY_ON_PROD, "solo_prod"
+        )
+        self._insert_dual_side_rows(
+            results.get("identical", []), files_s1_meta, files_s2_meta, FileStatus.IDENTICAL, "identical"
+        )
 
         self.diff_button.configure(state="disabled")
-        
-        has_changes = results['different'] or results['only_on_1'] or results['only_on_2']
-        if has_changes:
-            self.sync_button.configure(state="normal")
-        
-        self.update_status(f"Done. Found {len(results['different'])} different files, "
-                           f"{len(results['only_on_1'])} only on TEST, {len(results['only_on_2'])} only on PROD.")
 
-    def show_error(self, title, message):
-        """Shows a cross-platform error message."""
+        has_changes = bool(
+            results.get("different")
+            or results.get("only_on_1")
+            or results.get("only_on_2")
+            or results.get("only_on_1_dirs")
+            or results.get("only_on_2_dirs")
+        )
+        sync_state = "normal" if has_changes else "disabled"
+        self.sync_button.configure(state=sync_state)
+        self.sync_reverse_button.configure(state=sync_state)
+
+        self.update_status(
+            f"Done. Found {len(results.get('different', []))} different files, "
+            f"{len(results.get('only_on_1', []))} only on TEST, "
+            f"{len(results.get('only_on_2', []))} only on PROD."
+        )
+
+    def show_error(self, title: str, message: str) -> None:
+        """Displays a modal error dialog."""
         messagebox.showerror(title, message, parent=self)
 
-    def open_url(self, url):
-        """Opens a URL, suppressing stderr on Linux to avoid Wayland warnings."""
+    def open_url(self, url: str) -> None:
+        """Opens a URL, suppressing noisy Wayland/XDG stderr messages on Linux."""
         if platform.system() == "Linux":
             try:
-                # Use xdg-open directly and suppress stderr
-                subprocess.Popen(['xdg-open', url], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+                subprocess.Popen(
+                    ["xdg-open", url],
+                    stderr=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                )
+                return
             except Exception:
-                webbrowser.open(url) # Fallback
-        else:
-            webbrowser.open(url)
+                pass
+        webbrowser.open(url)
 
-    def open_about_window(self):
-        """Opens the About pop-up."""
-        about_toplevel = ctk.CTkToplevel(self)
-        about_toplevel.title("About MINO")
-        about_toplevel.geometry("340x200")
-        about_toplevel.resizable(False, False)
-        about_toplevel.transient(self) # Make it modal-like on top of main window
-        
-        # Center the window
-        about_toplevel.update_idletasks()
-        width = about_toplevel.winfo_width()
-        height = about_toplevel.winfo_height()
-        x = (about_toplevel.winfo_screenwidth() // 2) - (width // 2)
-        y = (about_toplevel.winfo_screenheight() // 2) - (height // 2)
-        about_toplevel.geometry('{}x{}+{}+{}'.format(width, height, x, y))
+    def open_about_window(self) -> None:
+        """Opens the About MINO dialog."""
+        about_toplevel = create_centered_toplevel(self, "About MINO", 340, 200, resizable=False)
 
-        # Content
-        # Title (Bold)
         ctk.CTkLabel(about_toplevel, text="MINO", font=("Helvetica", 24, "bold")).pack(pady=(20, 2))
-        
-        # Subtitle (Regular font)
-        ctk.CTkLabel(about_toplevel, text="Mirroring Integrity Network Operations", font=("Helvetica", 13)).pack(pady=(0, 10))
-        
-        # Author (Same Regular font)
-        ctk.CTkLabel(about_toplevel, text="Created by Alessio Saponaro", font=("Helvetica", 13)).pack(pady=(0, 15))
-        
-        # Button
-        ctk.CTkButton(about_toplevel, text="View on GitHub", height=30, command=lambda: self.open_url("https://github.com/Negatorto/mino")).pack(pady=5)
+        ctk.CTkLabel(
+            about_toplevel,
+            text="Mirroring Integrity Network Operations",
+            font=("Helvetica", 13),
+        ).pack(pady=(0, 10))
+        ctk.CTkLabel(
+            about_toplevel,
+            text="Created by Alessio Saponaro",
+            font=("Helvetica", 13),
+        ).pack(pady=(0, 15))
+        ctk.CTkButton(
+            about_toplevel,
+            text="View on GitHub",
+            height=30,
+            command=lambda: self.open_url("https://github.com/Negatorto/mino"),
+        ).pack(pady=5)
+
+
+def main() -> None:
+    ctk.set_appearance_mode("System")
+    ctk.set_default_color_theme("blue")
+    app = App()
+    app.mainloop()
 
 
 if __name__ == "__main__":
-    ctk.set_appearance_mode("System")  # Modes: "System" (standard), "Dark", "Light"
-    ctk.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark-blue"
-
-    app = App()
-    app.mainloop()
+    main()
